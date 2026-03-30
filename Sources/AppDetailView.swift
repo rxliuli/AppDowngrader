@@ -68,9 +68,9 @@ struct AppDetailView: View {
                 Text("Loading available versions...").foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if let error = state.versionsError {
-            VStack(spacing: 8) {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
+        } else if state.versionsError != nil {
+            VStack(spacing: 12) {
+                Label(state.versionsError!, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.orange)
 
@@ -104,14 +104,9 @@ struct AppDetailView: View {
                                     .foregroundStyle(.blue)
                             }
                         }
-                        HStack(spacing: 8) {
-                            if let date = version.formattedDate {
-                                Text(date)
-                            }
-                            Text("ID: \(version.id)")
-                        }
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
+                        Text("ID: \(version.id)")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
                     }
 
                     Spacer()

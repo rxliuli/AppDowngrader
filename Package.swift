@@ -7,7 +7,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "AppDowngrader",
-            path: "Sources"
+            path: "Sources",
+            resources: [
+                .copy("AppIcon.png")
+            ]
         )
     ]
 )

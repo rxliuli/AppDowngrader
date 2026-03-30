@@ -97,7 +97,7 @@ struct SetupView: View {
             .padding()
             .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
 
-            Text("brew install ipatool libimobiledevice ideviceinstaller")
+            Text("brew install ipatool && npm install -g go-ios")
                 .font(.system(.body, design: .monospaced))
                 .padding(8)
                 .background(.black.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
@@ -123,6 +123,7 @@ struct MainView: View {
 
         NavigationSplitView {
             SidebarView()
+                .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 300)
         } detail: {
             if let app = state.selectedApp {
                 AppDetailView(app: app)
@@ -246,22 +247,44 @@ struct AuthSheet: View {
             Text("Apple ID Login")
                 .font(.title2.bold())
 
-            Text("Login with your Apple ID to download apps")
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-
             if state.isAuthenticated {
+                Text("Login with your Apple ID to download apps")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+
                 Label("Already authenticated", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
+            } else if state.authStep == .twoFactor {
+                Text("A verification code has been sent to your device.\nEnter it below to continue.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+
+                TextField("Verification Code", text: $state.authCode)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { if !state.authCode.isEmpty { Task { await state.login() } } }
+
+                if case .error(let msg) = state.status {
+                    Text(msg)
+                        .foregroundStyle(.red)
+                        .font(.caption)
+                }
+
+                Button("Verify") {
+                    Task { await state.login() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(state.authCode.isEmpty)
             } else {
+                Text("Login with your Apple ID to download apps")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+
                 TextField("Email", text: $state.email)
                     .textFieldStyle(.roundedBorder)
 
                 SecureField("Password", text: $state.password)
                     .textFieldStyle(.roundedBorder)
-
-                TextField("2FA Code (if required)", text: $state.authCode)
-                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { if !state.email.isEmpty && !state.password.isEmpty { Task { await state.login() } } }
 
                 if case .error(let msg) = state.status {
                     Text(msg)

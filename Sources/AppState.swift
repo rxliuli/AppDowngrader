@@ -30,10 +30,13 @@ class AppState {
 
     // Auth
     var isAuthenticated = false
+    enum AuthStep { case credentials, twoFactor }
+    var authStep: AuthStep = .credentials
     var email = ""
     var password = ""
     var authCode = ""
     var showAuthSheet = false
+    private var retryAfterLogin: (@MainActor () async -> Void)?
 
     // Task status (for download/install operations)
     var status: TaskStatus = .idle
@@ -105,18 +108,42 @@ class AppState {
         }
     }
 
+    // MARK: - Auth Error Handling
+
+    private static let authErrorPatterns = [
+        "password token is expired", "token is expired",
+        "authentication required", "not authenticated",
+        "unsupported protocol scheme",
+        "could not be found in the keyring", "failed to get account",
+    ]
+
+    nonisolated static func looksLikeAuthError(_ message: String) -> Bool {
+        authErrorPatterns.contains { message.localizedCaseInsensitiveContains($0) }
+    }
+
+    /// Check if an error is auth-related; if so, prompt login and retry.
+    /// Returns true if re-login was triggered (caller should abort current flow).
+    private func handleAuthErrorIfNeeded(_ error: Error, retry: @escaping @MainActor () async -> Void) -> Bool {
+        let msg = error.localizedDescription
+        if Self.looksLikeAuthError(msg) {
+            isAuthenticated = false
+            authStep = .credentials
+            retryAfterLogin = retry
+            showAuthSheet = true
+            status = .idle
+            return true
+        }
+        return false
+    }
+
     // MARK: - Actions
 
     func checkDependencies() async {
         async let ipatool = Shell.which("ipatool")
-        async let installer = Shell.which("ideviceinstaller")
-        async let deviceId = Shell.which("idevice_id")
-        async let deviceInfo = Shell.which("ideviceinfo")
+        async let goIos = Shell.which("ios")
 
         dependencies.ipatool = await ipatool
-        dependencies.ideviceinstaller = await installer
-        dependencies.ideviceId = await deviceId
-        dependencies.ideviceinfo = await deviceInfo
+        dependencies.goIos = await goIos
         dependenciesChecked = true
     }
 
@@ -127,18 +154,34 @@ class AppState {
     func login() async {
         status = .loading("Logging in...")
         do {
-            let success = try await AppStoreService.login(
+            // Revoke existing session to clear potentially corrupted state
+            if authStep == .credentials {
+                await AppStoreService.revoke()
+            }
+
+            let result = try await AppStoreService.login(
                 email: email, password: password,
-                authCode: authCode.isEmpty ? nil : authCode
+                authCode: authStep == .twoFactor ? authCode : nil
             )
-            if success {
+            switch result {
+            case .success:
                 isAuthenticated = true
                 showAuthSheet = false
-                status = .success("Logged in")
+                status = .idle
                 password = ""
                 authCode = ""
-            } else {
-                status = .error("Login failed — check credentials or enter 2FA code")
+                authStep = .credentials
+
+                // Retry the action that triggered re-login
+                if let retry = retryAfterLogin {
+                    retryAfterLogin = nil
+                    await retry()
+                }
+            case .requires2FA:
+                authStep = .twoFactor
+                status = .idle
+            case .failure(let msg):
+                status = .error(msg)
             }
         } catch {
             status = .error(error.localizedDescription)
@@ -204,9 +247,14 @@ class AppState {
 
         do {
             let versionIds = try await AppStoreService.listVersions(bundleId: bundleId)
-            // Reverse: newest versions first
             versions = versionIds.reversed().map { AppVersion(id: $0) }
         } catch {
+            if handleAuthErrorIfNeeded(error, retry: { [weak self] in
+                guard let self, let app = self.selectedApp else { return }
+                await self.loadVersions(for: app.bundleId)
+            }) {
+                return
+            }
             versionsError = error.localizedDescription
         }
     }
@@ -221,25 +269,22 @@ class AppState {
         // Check disk cache first
         if let cached = await MetadataCache.shared.get(versionId) {
             if let idx = versions.firstIndex(where: { $0.id == versionId }) {
-                versions[idx].version = cached.version
-                versions[idx].releaseDate = cached.releaseDate
+                versions[idx].version = cached
                 versions[idx].metadataLoaded = true
             }
             return
         }
 
-        let meta = await AppStoreService.getVersionMetadata(
+        let version = await AppStoreService.getVersionMetadata(
             bundleId: app.bundleId, versionId: versionId
         )
         if let idx = versions.firstIndex(where: { $0.id == versionId }) {
-            versions[idx].version = meta.version
-            versions[idx].releaseDate = meta.releaseDate
+            versions[idx].version = version
             versions[idx].metadataLoaded = true
         }
 
-        // Cache to disk (only if we got some data)
-        if meta.version != nil || meta.releaseDate != nil {
-            await MetadataCache.shared.set(versionId, version: meta.version, releaseDate: meta.releaseDate)
+        if let version {
+            await MetadataCache.shared.set(versionId, version: version)
         }
     }
 
@@ -267,9 +312,17 @@ class AppState {
 
             status = .success("Successfully installed \(app.name)")
             await loadApps(for: device)
+            // Update selectedApp to reflect the new installed version
+            if let updated = installedApps.first(where: { $0.bundleId == app.bundleId }) {
+                selectedApp = updated
+            }
         } catch {
             downloadProgress = nil
-            status = .error(error.localizedDescription)
+            if !handleAuthErrorIfNeeded(error, retry: { [weak self] in
+                await self?.downloadAndInstall()
+            }) {
+                status = .error(error.localizedDescription)
+            }
         }
     }
 }

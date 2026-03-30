@@ -1,33 +1,60 @@
 import Foundation
 
 enum DeviceService {
+    /// Parse JSON from go-ios output, skipping warning/log lines.
+    private static func parseJSON(_ output: String) -> Any? {
+        // go-ios outputs warning/log lines before JSON; collect non-log content
+        var jsonLines: [String] = []
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+            if trimmed.hasPrefix("{\"level\"") { continue }
+            jsonLines.append(line)
+        }
+
+        let joined = jsonLines.joined(separator: "\n")
+        guard let data = joined.data(using: .utf8) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data)
+    }
+
     static func listDeviceUDIDs() async -> [String] {
-        guard let result = try? await Shell.run("idevice_id", arguments: ["-l"]),
-              result.succeeded else { return [] }
-        return result.stdout.components(separatedBy: .newlines).filter { !$0.isEmpty }
+        guard let result = try? await Shell.run("ios", arguments: ["list"]),
+              result.succeeded,
+              let json = parseJSON(result.stdout) as? [String: Any],
+              let list = json["deviceList"] as? [String]
+        else { return [] }
+        return list
     }
 
     static func getDeviceInfo(udid: String) async throws -> Device {
-        let result = try await Shell.run("ideviceinfo", arguments: ["-u", udid, "-s"])
-        guard result.succeeded else {
-            throw NSError(domain: "DeviceService", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: result.stderr])
-        }
+        // Get product type and version from list --details
+        async let detailsResult = Shell.run(
+            "ios", arguments: ["list", "--details", "--udid=\(udid)"]
+        )
+        // Get device name separately
+        async let nameResult = Shell.run(
+            "ios", arguments: ["devicename", "--udid=\(udid)"]
+        )
 
-        var name = udid
+        let details = try await detailsResult
+        let nameRes = try await nameResult
+
         var productType = "Unknown"
         var iosVersion = "Unknown"
 
-        for line in result.stdout.components(separatedBy: .newlines) {
-            let parts = line.split(separator: ":", maxSplits: 1)
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-            guard parts.count == 2 else { continue }
-            switch parts[0] {
-            case "DeviceName": name = parts[1]
-            case "ProductType": productType = parts[1]
-            case "ProductVersion": iosVersion = parts[1]
-            default: break
-            }
+        if details.succeeded,
+           let json = parseJSON(details.stdout) as? [String: Any],
+           let list = json["deviceList"] as? [[String: Any]],
+           let device = list.first {
+            productType = device["ProductType"] as? String ?? "Unknown"
+            iosVersion = device["ProductVersion"] as? String ?? "Unknown"
+        }
+
+        var name = udid
+        if nameRes.succeeded,
+           let json = parseJSON(nameRes.stdout) as? [String: Any],
+           let deviceName = json["devicename"] as? String {
+            name = deviceName
         }
 
         return Device(id: udid, name: name, productType: productType, iosVersion: iosVersion)
@@ -35,42 +62,36 @@ enum DeviceService {
 
     static func listInstalledApps(udid: String) async throws -> [InstalledApp] {
         let result = try await Shell.run(
-            "ideviceinstaller",
-            arguments: ["-u", udid, "list", "--user"]
+            "ios", arguments: ["apps", "--udid=\(udid)"],
+            timeout: 30
         )
         guard result.succeeded else {
             throw NSError(domain: "DeviceService", code: 2,
-                          userInfo: [NSLocalizedDescriptionKey: result.stderr])
+                          userInfo: [NSLocalizedDescriptionKey: result.stderr.strippingANSI])
         }
 
-        var apps: [InstalledApp] = []
-        let lines = result.stdout.components(separatedBy: .newlines)
+        // go-ios apps outputs a JSON array (possibly after warning lines)
+        guard let apps = parseJSON(result.stdout) as? [[String: Any]]
+        else { return [] }
 
-        for line in lines.dropFirst() { // skip header
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty else { continue }
-
-            // Format: "com.example.app, \"1.0\", \"App Name\""
-            let parts = trimmed.components(separatedBy: ", ")
-            guard parts.count >= 3 else { continue }
-
-            let bundleId = parts[0]
-            let version = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-            let name = parts.dropFirst(2).joined(separator: ", ")
-                .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-
-            apps.append(InstalledApp(bundleId: bundleId, name: name, version: version))
-        }
-
-        return apps.sorted {
-            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-        }
+        return apps
+            .filter { ($0["ApplicationType"] as? String) == "User" }
+            .compactMap { app -> InstalledApp? in
+                guard let bundleId = app["CFBundleIdentifier"] as? String else { return nil }
+                let name = app["CFBundleDisplayName"] as? String
+                    ?? app["CFBundleName"] as? String
+                    ?? bundleId
+                let version = app["CFBundleShortVersionString"] as? String ?? "?"
+                return InstalledApp(bundleId: bundleId, name: name, version: version)
+            }
+            .sorted {
+                $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
     }
 
     static func uninstallApp(udid: String, bundleId: String) async throws {
         let result = try await Shell.run(
-            "ideviceinstaller",
-            arguments: ["-u", udid, "uninstall", bundleId],
+            "ios", arguments: ["uninstall", bundleId, "--udid=\(udid)"],
             timeout: 30
         )
         guard result.succeeded else {
@@ -81,7 +102,7 @@ enum DeviceService {
 
     static func installIPA(udid: String, path: String) async throws {
         let result = try await Shell.run(
-            "ideviceinstaller", arguments: ["-u", udid, "install", path],
+            "ios", arguments: ["install", "--path=\(path)", "--udid=\(udid)"],
             timeout: 600
         )
         guard result.succeeded else {

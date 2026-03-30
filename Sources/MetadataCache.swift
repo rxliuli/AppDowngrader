@@ -5,12 +5,8 @@ import Foundation
 actor MetadataCache {
     static let shared = MetadataCache()
 
-    private struct Entry: Codable {
-        let version: String?
-        let releaseDate: String?
-    }
+    private var cache: [String: String] = [:] // versionId -> displayVersion
 
-    private var cache: [String: Entry] = [:]
     private let fileURL: URL
 
     private init() {
@@ -20,28 +16,19 @@ actor MetadataCache {
         let url = cacheDir.appendingPathComponent("version-metadata.json")
         fileURL = url
 
-        // Load cache inline (init is nonisolated, so can't call actor method)
         if let data = try? Data(contentsOf: url),
-           let decoded = try? JSONDecoder().decode([String: Entry].self, from: data) {
+           let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
             cache = decoded
         }
     }
 
-    func get(_ versionId: String) -> (version: String?, releaseDate: String?)? {
-        guard let entry = cache[versionId] else { return nil }
-        return (entry.version, entry.releaseDate)
+    func get(_ versionId: String) -> String? {
+        cache[versionId]
     }
 
-    func set(_ versionId: String, version: String?, releaseDate: String?) {
-        cache[versionId] = Entry(version: version, releaseDate: releaseDate)
+    func set(_ versionId: String, version: String) {
+        cache[versionId] = version
         save()
-    }
-
-    private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder().decode([String: Entry].self, from: data)
-        else { return }
-        cache = decoded
     }
 
     private func save() {

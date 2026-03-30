@@ -8,13 +8,30 @@ enum AppStoreService {
         return result.succeeded
     }
 
-    static func login(email: String, password: String, authCode: String? = nil) async throws -> Bool {
-        var args = ["auth", "login", "-e", email, "-p", password]
+    enum LoginResult {
+        case success
+        case requires2FA
+        case failure(String)
+    }
+
+    static func login(email: String, password: String, authCode: String? = nil) async throws -> LoginResult {
+        var args = ["auth", "login", "-e", email, "-p", password,
+                    "--format", "json", "--non-interactive"]
         if let code = authCode, !code.isEmpty {
             args += ["--auth-code", code]
         }
-        let result = try await Shell.run("ipatool", arguments: args)
-        return result.succeeded
+        let result = try await Shell.run("ipatool", arguments: args, timeout: 30)
+        print("[AppStore] login: exit=\(result.exitCode) stdout=\(result.stdout) stderr=\(result.stderr)")
+        // ipatool returns exit=0 with a "message" field when 2FA is needed
+        let output = result.stdout
+        if output.contains("2FA") || output.contains("--auth-code") {
+            return .requires2FA
+        }
+        if result.succeeded {
+            return .success
+        }
+        let raw = result.stderr.isEmpty ? output : result.stderr
+        return .failure(parseError(raw))
     }
 
     static func lookupApp(bundleId: String) async -> ITunesLookupResult? {
@@ -31,23 +48,82 @@ enum AppStoreService {
         }
     }
 
+    static func revoke() async {
+        _ = try? await Shell.run("ipatool", arguments: ["auth", "revoke"], timeout: 10)
+    }
+
+    static func purchase(bundleId: String) async -> (succeeded: Bool, error: String?) {
+        print("[AppStore] purchase: \(bundleId)")
+        guard let result = try? await Shell.run(
+            "ipatool",
+            arguments: ["purchase", "-b", bundleId, "--format", "json"],
+            timeout: 30
+        ) else {
+            print("[AppStore] purchase: failed to run ipatool")
+            return (false, "failed to run ipatool")
+        }
+        print("[AppStore] purchase: exit=\(result.exitCode) stdout=\(result.stdout) stderr=\(result.stderr)")
+        if result.succeeded {
+            return (true, nil)
+        }
+        let raw = result.stderr.isEmpty ? result.stdout : result.stderr
+        return (false, parseError(raw))
+    }
+
     static func listVersions(bundleId: String) async throws -> [String] {
-        let result = try await Shell.run(
+        print("[AppStore] listVersions: \(bundleId)")
+
+        // Try list-versions directly first (works if user already has license)
+        var result = try await Shell.run(
             "ipatool",
             arguments: ["list-versions", "-b", bundleId, "--format", "json"],
             timeout: 30
         )
+        print("[AppStore] listVersions: exit=\(result.exitCode) stdout=\(result.stdout) stderr=\(result.stderr)")
+
+        // If failed, try purchase + retry
+        if !result.succeeded {
+            print("[AppStore] listVersions: failed, attempting purchase...")
+            let purchaseResult = await purchase(bundleId: bundleId)
+            if purchaseResult.succeeded {
+                result = try await Shell.run(
+                    "ipatool",
+                    arguments: ["list-versions", "-b", bundleId, "--format", "json"],
+                    timeout: 30
+                )
+                print("[AppStore] listVersions retry: exit=\(result.exitCode) stdout=\(result.stdout) stderr=\(result.stderr)")
+            } else if let purchaseError = purchaseResult.error,
+                      AppState.looksLikeAuthError(purchaseError) {
+                // Auth error from purchase — trigger re-login
+                throw NSError(domain: "AppStore", code: 4,
+                              userInfo: [NSLocalizedDescriptionKey: purchaseError])
+            } else {
+                print("[AppStore] listVersions: purchase also failed: \(purchaseResult.error ?? "unknown")")
+            }
+        }
+
         guard result.succeeded else {
             let raw = result.stderr.isEmpty ? result.stdout : result.stderr
             throw NSError(domain: "AppStore", code: 3,
                           userInfo: [NSLocalizedDescriptionKey: Self.parseError(raw)])
         }
 
-        guard let data = result.stdout.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let ids = json["externalVersionIdentifiers"] as? [Any]
-        else { return [] }
+        let cleaned = result.stdout.strippingANSI
+        guard let data = cleaned.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            print("[AppStore] listVersions: failed to parse JSON from stdout: \(result.stdout)")
+            return []
+        }
 
+        print("[AppStore] listVersions: JSON keys=\(Array(json.keys))")
+
+        guard let ids = json["externalVersionIdentifiers"] as? [Any] else {
+            print("[AppStore] listVersions: no externalVersionIdentifiers, full JSON: \(json)")
+            return []
+        }
+
+        print("[AppStore] listVersions: found \(ids.count) versions")
         return ids.compactMap {
             if let str = $0 as? String { return str }
             if let num = $0 as? NSNumber { return num.stringValue }
@@ -55,14 +131,9 @@ enum AppStoreService {
         }
     }
 
-    struct VersionMetadata {
-        let version: String?
-        let releaseDate: String?
-    }
-
     static func getVersionMetadata(
         bundleId: String, versionId: String
-    ) async -> VersionMetadata {
+    ) async -> String? {
         guard let result = try? await Shell.run(
             "ipatool",
             arguments: [
@@ -73,12 +144,9 @@ enum AppStoreService {
         ), result.succeeded,
               let data = result.stdout.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return VersionMetadata(version: nil, releaseDate: nil) }
+        else { return nil }
 
-        return VersionMetadata(
-            version: json["displayVersion"] as? String,
-            releaseDate: json["releaseDate"] as? String
-        )
+        return json["displayVersion"] as? String
     }
 
     static func download(

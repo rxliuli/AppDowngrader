@@ -16,20 +16,16 @@ struct InstalledApp: Identifiable, Hashable {
 
 struct DependencyStatus {
     var ipatool: Bool = false
-    var ideviceinstaller: Bool = false
-    var ideviceId: Bool = false
-    var ideviceinfo: Bool = false
+    var goIos: Bool = false
 
     var allSatisfied: Bool {
-        ipatool && ideviceinstaller && ideviceId && ideviceinfo
+        ipatool && goIos
     }
 
     var missingTools: [String] {
         var missing: [String] = []
         if !ipatool { missing.append("ipatool") }
-        if !ideviceinstaller { missing.append("ideviceinstaller") }
-        if !ideviceId { missing.append("idevice_id (libimobiledevice)") }
-        if !ideviceinfo { missing.append("ideviceinfo (libimobiledevice)") }
+        if !goIos { missing.append("go-ios") }
         return missing
     }
 }
@@ -37,21 +33,11 @@ struct DependencyStatus {
 struct AppVersion: Identifiable, Hashable {
     let id: String // external version identifier
     var version: String? // human-readable version string (e.g. "2.0.1")
-    var releaseDate: String? // ISO date string
     var metadataLoaded = false
 
     var displayName: String {
         if let version { return "v\(version)" }
         return "Build \(id)"
-    }
-
-    var formattedDate: String? {
-        guard let releaseDate else { return nil }
-        let formatter = ISO8601DateFormatter()
-        guard let date = formatter.date(from: releaseDate) else { return nil }
-        let display = DateFormatter()
-        display.dateFormat = "yyyy-MM-dd"
-        return display.string(from: date)
     }
 }
 

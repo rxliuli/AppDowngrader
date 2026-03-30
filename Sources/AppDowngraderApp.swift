@@ -9,27 +9,22 @@ struct AppDowngraderApp: App {
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
 
-        // Set Dock icon from SF Symbol
-        if let icon = NSImage(
-            systemSymbolName: "arrow.down.app.fill",
-            accessibilityDescription: "AppDowngrader"
-        ) {
-            icon.isTemplate = false
-            let size = NSSize(width: 128, height: 128)
-            let colored = NSImage(size: size)
-            colored.lockFocus()
-            NSColor.systemBlue.setFill()
-            NSBezierPath(
-                roundedRect: NSRect(origin: .zero, size: size),
-                xRadius: 28, yRadius: 28
-            ).fill()
-            NSColor.white.setFill()
-            icon.draw(
-                in: NSRect(x: 20, y: 20, width: 88, height: 88),
-                from: .zero, operation: .destinationIn, fraction: 1.0
+        // Set Dock icon from bundled image, with macOS-standard padding
+        let iconPath = Bundle.module.path(forResource: "AppIcon", ofType: "png")
+            ?? Bundle.main.path(forResource: "AppIcon", ofType: "png")
+        if let path = iconPath, let src = NSImage(contentsOfFile: path) {
+            let canvas = NSSize(width: 1024, height: 1024)
+            let inset: CGFloat = 100 // padding around icon
+            let icon = NSImage(size: canvas)
+            icon.lockFocus()
+            src.draw(
+                in: NSRect(x: inset, y: inset,
+                           width: canvas.width - inset * 2,
+                           height: canvas.height - inset * 2),
+                from: .zero, operation: .sourceOver, fraction: 1.0
             )
-            colored.unlockFocus()
-            NSApplication.shared.applicationIconImage = colored
+            icon.unlockFocus()
+            NSApplication.shared.applicationIconImage = icon
         }
     }
 
