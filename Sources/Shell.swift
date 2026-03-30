@@ -8,6 +8,16 @@ struct ShellResult {
 }
 
 enum Shell {
+    /// Resolve a command to a full path: bundled binary > PATH lookup.
+    private static func resolveCommand(_ command: String) -> (url: URL, isBundled: Bool) {
+        // Check for bundled binary in app resources
+        if let bundledURL = Bundle.module.url(forResource: command, withExtension: nil, subdirectory: "bin") {
+            return (bundledURL, true)
+        }
+        // Fallback: use /usr/bin/env to find on PATH
+        return (URL(fileURLWithPath: "/usr/bin/env"), false)
+    }
+
     private static func makeEnv() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         let home = env["HOME"] ?? "/Users/\(NSUserName())"
@@ -32,8 +42,9 @@ enum Shell {
             let stdoutPipe = Pipe()
             let stderrPipe = Pipe()
 
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = [command] + arguments
+            let resolved = resolveCommand(command)
+            process.executableURL = resolved.url
+            process.arguments = resolved.isBundled ? arguments : [command] + arguments
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
             process.environment = makeEnv()
@@ -126,6 +137,10 @@ enum Shell {
     }
 
     static func which(_ command: String) async -> Bool {
+        // Check bundled binary first
+        if Bundle.module.url(forResource: command, withExtension: nil, subdirectory: "bin") != nil {
+            return true
+        }
         guard let result = try? await run("which", arguments: [command], timeout: 5)
         else { return false }
         return result.succeeded

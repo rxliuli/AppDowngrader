@@ -9,7 +9,8 @@ let package = Package(
             name: "AppDowngrader",
             path: "Sources",
             resources: [
-                .copy("AppIcon.png")
+                .copy("AppIcon.png"),
+                .copy("bin")
             ]
         )
     ]

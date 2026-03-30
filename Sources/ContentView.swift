@@ -207,29 +207,37 @@ struct SidebarView: View {
                 Task { await state.selectApp(app) }
             }
         }
-        .toolbar {
-            ToolbarItem(placement: .automatic) {
-                HStack(spacing: 8) {
-                    Button {
-                        Task { await state.refreshDevices() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .disabled(state.isRefreshingDevices)
-                    .help("Refresh device & apps")
-
-                    Button {
-                        state.showAuthSheet = true
-                    } label: {
+        .safeAreaInset(edge: .bottom) {
+            HStack {
+                Button {
+                    state.showAuthSheet = true
+                } label: {
+                    HStack(spacing: 4) {
                         Image(
                             systemName: state.isAuthenticated
                                 ? "person.fill.checkmark" : "person.badge.key"
                         )
-                        .foregroundStyle(state.isAuthenticated ? .green : .orange)
+                        Text(state.isAuthenticated ? "Logged in" : "Login")
+                            .font(.caption)
                     }
-                    .help(state.isAuthenticated ? "Authenticated" : "Login to App Store")
+                    .foregroundStyle(state.isAuthenticated ? .green : .orange)
                 }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Button {
+                    Task { await state.refreshDevices() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .disabled(state.isRefreshingDevices)
+                .help("Refresh device & apps")
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.bar)
         }
     }
 }
@@ -254,6 +262,11 @@ struct AuthSheet: View {
 
                 Label("Already authenticated", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
+
+                Button("Logout") {
+                    Task { await state.logout() }
+                }
+                .buttonStyle(.bordered)
             } else if state.authStep == .twoFactor {
                 Text("A verification code has been sent to your device.\nEnter it below to continue.")
                     .foregroundStyle(.secondary)

@@ -188,6 +188,13 @@ class AppState {
         }
     }
 
+    func logout() async {
+        await AppStoreService.revoke()
+        isAuthenticated = false
+        authStep = .credentials
+        status = .idle
+    }
+
     func refreshDevices() async {
         isRefreshingDevices = true
         defer { isRefreshingDevices = false }
@@ -224,6 +231,7 @@ class AppState {
     }
 
     func selectApp(_ app: InstalledApp) async {
+        status = .idle
         storeInfo = nil
         versions = []
         selectedVersion = nil

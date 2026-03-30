@@ -68,19 +68,19 @@ struct AppDetailView: View {
                 Text("Loading available versions...").foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if state.versionsError != nil {
+        } else if let error = state.versionsError {
             VStack(spacing: 12) {
-                Label(state.versionsError!, systemImage: "exclamationmark.triangle.fill")
+                Label(Self.friendlyError(error), systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.orange)
+                    .help(error)
 
-                Text("Enter version ID manually:")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
-                TextField("e.g. 843465168", text: $state.manualVersionId)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 300)
+                Button {
+                    Task { await state.loadVersions(for: app.bundleId) }
+                } label: {
+                    Label("Retry", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
             }
             .padding(20)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -214,6 +214,22 @@ struct AppDetailView: View {
     private var isLoading: Bool {
         if case .loading = state.status { return true }
         return false
+    }
+
+    private static func friendlyError(_ error: String) -> String {
+        let networkPatterns = ["failed to send http request", "failed to make round trip",
+                               "TLS handshake timeout", "connection refused",
+                               "network is unreachable", "timed out", "EOF"]
+        if networkPatterns.contains(where: { error.localizedCaseInsensitiveContains($0) }) {
+            return "Network error — unable to connect to Apple servers"
+        }
+        if error.contains("purchasing paid apps is not supported") {
+            return "Paid apps cannot be listed — purchase it on the App Store first"
+        }
+        if error.contains("app not found") {
+            return "App not found in the App Store"
+        }
+        return error
     }
 }
 
