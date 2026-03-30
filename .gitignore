@@ -1,2 +1,6 @@
 .build/
 .swiftpm/
+.env
+.claude/
+dist/
+.DS_Store
