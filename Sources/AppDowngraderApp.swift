@@ -10,8 +10,7 @@ struct AppDowngraderApp: App {
         NSApplication.shared.activate(ignoringOtherApps: true)
 
         // Set Dock icon from bundled image, with macOS-standard padding
-        let iconPath = Bundle.module.path(forResource: "AppIcon", ofType: "png")
-            ?? Bundle.main.path(forResource: "AppIcon", ofType: "png")
+        let iconPath = resourceBundle.path(forResource: "AppIcon", ofType: "png")
         if let path = iconPath, let src = NSImage(contentsOfFile: path) {
             let canvas = NSSize(width: 1024, height: 1024)
             let inset: CGFloat = 100 // padding around icon

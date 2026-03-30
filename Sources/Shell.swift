@@ -1,5 +1,20 @@
 import Foundation
 
+/// Resource bundle that works for SwiftPM (Bundle.module), Xcode (Bundle.main),
+/// and script-packaged .app bundles (Contents/Resources/).
+let resourceBundle: Bundle = {
+    // Check Contents/Resources/ first (script-packaged .app)
+    if let resourceURL = Bundle.main.resourceURL,
+       let bundle = Bundle(url: resourceURL.appendingPathComponent("AppDowngrader_AppDowngrader.bundle")) {
+        return bundle
+    }
+    #if SWIFT_PACKAGE
+    return Bundle.module
+    #else
+    return Bundle.main
+    #endif
+}()
+
 struct ShellResult {
     let stdout: String
     let stderr: String
@@ -11,7 +26,7 @@ enum Shell {
     /// Resolve a command to a full path: bundled binary > PATH lookup.
     private static func resolveCommand(_ command: String) -> (url: URL, isBundled: Bool) {
         // Check for bundled binary in app resources
-        if let bundledURL = Bundle.module.url(forResource: command, withExtension: nil, subdirectory: "bin") {
+        if let bundledURL = resourceBundle.url(forResource: command, withExtension: nil, subdirectory: "bin") {
             return (bundledURL, true)
         }
         // Fallback: use /usr/bin/env to find on PATH
@@ -138,7 +153,7 @@ enum Shell {
 
     static func which(_ command: String) async -> Bool {
         // Check bundled binary first
-        if Bundle.module.url(forResource: command, withExtension: nil, subdirectory: "bin") != nil {
+        if resourceBundle.url(forResource: command, withExtension: nil, subdirectory: "bin") != nil {
             return true
         }
         guard let result = try? await run("which", arguments: [command], timeout: 5)
