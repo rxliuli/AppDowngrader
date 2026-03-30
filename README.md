@@ -2,7 +2,7 @@
 
 A macOS app for downgrading iOS apps to older versions. It provides a GUI for browsing installed apps on your iOS device, viewing available historical versions, and installing any previous version.
 
-![screenshot](screenshot.png)
+[![Demo Video](screenshot.png)](https://www.youtube.com/watch?v=ZYa1Teq-5kI)
 
 ## Features
 
