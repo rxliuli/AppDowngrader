@@ -5,193 +5,21 @@ on:
     branches: [main]
     paths:
       - 'Info.plist'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  check-version:
-    runs-on: ubuntu-latest
-    outputs:
-      changed: ${{ steps.version.outputs.changed }}
-      version: ${{ steps.version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 2
-      - id: version
-        run: |
-          read_version() {
-            python3 -c "import plistlib,sys;print(plistlib.load(open(sys.argv[1],'rb'))['CFBundleShortVersionString'])" "$1"
-          }
-          CURRENT=$(read_version Info.plist)
-          PREVIOUS=""
-          if git show HEAD~1:Info.plist > /tmp/prev.plist 2>/dev/null; then
-            PREVIOUS=$(read_version /tmp/prev.plist || true)
-          fi
-          echo "version=${CURRENT}" >> "$GITHUB_OUTPUT"
-          if [[ "${CURRENT}" != "${PREVIOUS}" ]]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  build-macos-dmg:
-    needs: check-version
-    if: needs.check-version.outputs.changed == 'true'
-    runs-on: macos-latest
-    environment: release-macOS
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Setup certificates
-        env:
-          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_DEVELOPERID_BASE64 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_DEVELOPERID_PASSWORD }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-        run: |
-          # Create keychain
-          security create-keychain -p actions $RUNNER_TEMP/app-signing.keychain-db
-          security set-keychain-settings -lut 21600 $RUNNER_TEMP/app-signing.keychain-db
-          security unlock-keychain -p actions $RUNNER_TEMP/app-signing.keychain-db
-          security default-keychain -s $RUNNER_TEMP/app-signing.keychain-db
-
-          # Import Developer ID certificate
-          echo "$CERTIFICATE_BASE64" | base64 --decode > $RUNNER_TEMP/cert.p12
-          security import $RUNNER_TEMP/cert.p12 -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $RUNNER_TEMP/app-signing.keychain-db
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions $RUNNER_TEMP/app-signing.keychain-db
-
-          # Verify
-          security find-identity -v -p codesigning $RUNNER_TEMP/app-signing.keychain-db
-
-          # Setup API key for notarization
-          mkdir -p ~/private_keys
-          echo "$APPLE_API_KEY" | base64 --decode > ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8
-
-      - name: Build release
-        run: swift build -c release
-
-      - name: Create app bundle
-        run: |
-          APP_NAME="AppDowngrader"
-          BUILD_DIR=".build/release"
-          APP_BUNDLE="dist/${APP_NAME}.app"
-          CONTENTS="${APP_BUNDLE}/Contents"
-
-          mkdir -p "${CONTENTS}/MacOS"
-          mkdir -p "${CONTENTS}/Resources"
-
-          cp "${BUILD_DIR}/${APP_NAME}" "${CONTENTS}/MacOS/"
-          cp -R "${BUILD_DIR}/${APP_NAME}_${APP_NAME}.bundle" "${CONTENTS}/Resources/"
-          cp Info.plist "${CONTENTS}/"
-          cp Sources/AppIcon.png "${CONTENTS}/Resources/"
-
-      - name: Sign app
-        env:
-          SIGNING_IDENTITY: ${{ vars.SIGNING_IDENTITY_DMG }}
-        run: |
-          APP_BUNDLE="dist/AppDowngrader.app"
-          CONTENTS="${APP_BUNDLE}/Contents"
-          BUNDLE_NAME="AppDowngrader_AppDowngrader.bundle"
-
-          # Sign bundled binaries (innermost → outermost)
-          for bin in "${CONTENTS}/Resources/${BUNDLE_NAME}/bin/"*; do
-            codesign --force --options runtime --timestamp --sign "${SIGNING_IDENTITY}" "$bin"
-          done
-
-          # Sign main executable
-          codesign --force --options runtime --timestamp \
-            --entitlements AppDowngrader.entitlements \
-            --sign "${SIGNING_IDENTITY}" \
-            "${CONTENTS}/MacOS/AppDowngrader"
-
-          # Sign app bundle
-          codesign --force --options runtime --timestamp \
-            --entitlements AppDowngrader.entitlements \
-            --sign "${SIGNING_IDENTITY}" \
-            "${APP_BUNDLE}"
-
-          # Verify
-          codesign --verify --deep --strict --verbose=2 "${APP_BUNDLE}"
-
-      - name: Create DMG
-        run: |
-          brew install create-dmg
-          create-dmg \
-            --volname "AppDowngrader" \
-            --window-pos 200 120 \
-            --window-size 660 400 \
-            --icon-size 100 \
-            --icon "AppDowngrader.app" 180 170 \
-            --hide-extension "AppDowngrader.app" \
-            --app-drop-link 480 170 \
-            --codesign "${{ vars.SIGNING_IDENTITY_DMG }}" \
-            "AppDowngrader-macos.dmg" \
-            "dist/AppDowngrader.app"
-
-      - name: Notarize DMG
-        env:
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        run: |
-          xcrun notarytool submit "AppDowngrader-macos.dmg" \
-            --key ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8 \
-            --key-id "${APPLE_API_KEY_ID}" \
-            --issuer "${APPLE_API_ISSUER}" \
-            --wait
-
-          xcrun stapler staple "AppDowngrader-macos.dmg"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-dmg
-          path: AppDowngrader-macos.dmg
-
-      - name: Cleanup keychain
-        if: always()
-        run: security delete-keychain $RUNNER_TEMP/app-signing.keychain-db
-
   release:
-    needs: [check-version, build-macos-dmg]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Create Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          VERSION="v${{ needs.check-version.outputs.version }}"
-          git tag "${VERSION}"
-          git push origin "${VERSION}"
-          gh release create "${VERSION}" \
-            --title "Release ${VERSION}" \
-            --generate-notes \
-            artifacts/*
-
-      - name: Update Homebrew tap
-        env:
-          TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
-        run: |
-          if [[ -z "${TAP_TOKEN}" ]]; then
-            echo "TAP_GITHUB_TOKEN not set, skipping tap update"
-            exit 0
-          fi
-          VERSION="${{ needs.check-version.outputs.version }}"
-          SHA256=$(sha256sum artifacts/AppDowngrader-macos.dmg | cut -d' ' -f1)
-          git clone "https://x-access-token:${TAP_TOKEN}@github.com/rxliuli/homebrew-tap.git" tap
-          cd tap
-          sed -i -E "s/version \"[^\"]+\"/version \"${VERSION}\"/" Casks/app-downgrader.rb
-          sed -i -E "s/sha256 \"[^\"]+\"/sha256 \"${SHA256}\"/" Casks/app-downgrader.rb
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -am "chore: bump app-downgrader to v${VERSION}"
-          git push
+    environment: release-macOS
+    uses: rxliuli/swift-rel/.github/workflows/release.yml@main
+    with:
+      app-name: AppDowngrader
+      version-file: Info.plist
+      cask: app-downgrader
+      tap: rxliuli/homebrew-tap
+      bins-dir: Contents/Resources/AppDowngrader_AppDowngrader.bundle/bin
+      entitlements: AppDowngrader.entitlements
+      signing-identity: 'Developer ID Application: KAI WANG (N2X78TUUFG)'
+    secrets: inherit
