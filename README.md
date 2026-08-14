@@ -20,7 +20,13 @@ A macOS app for downgrading iOS apps to older versions. It provides a GUI for br
 
 ## Install
 
-Download the latest `.dmg` from [Releases](https://github.com/rxliuli/AppDowngrader/releases), open it, and drag AppDowngrader to Applications.
+**Homebrew (recommended):**
+
+```bash
+brew install rxliuli/tap/app-downgrader
+```
+
+**Manual:** Download the latest `.dmg` from [Releases](https://github.com/rxliuli/AppDowngrader/releases), open it, and drag AppDowngrader to Applications.
 
 ## First Run: macOS Keychain Prompt
 
