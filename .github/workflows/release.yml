@@ -12,7 +12,6 @@ permissions:
 
 jobs:
   release:
-    environment: release-macOS
     uses: rxliuli/swift-rel/.github/workflows/release.yml@main
     with:
       app-name: AppDowngrader
