@@ -22,6 +22,18 @@ A macOS app for downgrading iOS apps to older versions. It provides a GUI for br
 
 Download the latest `.dmg` from [Releases](https://github.com/rxliuli/AppDowngrader/releases), open it, and drag AppDowngrader to Applications.
 
+## First Run: macOS Keychain Prompt
+
+On first use, macOS may show a system dialog asking to allow **ipatool** to access your Keychain:
+
+> "ipatool wants to use your confidential information stored in your keychain. To allow this, enter the \"login\" keychain password."
+
+This is normal and safe:
+
+- The password it asks for is your **Mac login (user account) password** — *not* your Apple ID password.
+- It is macOS asking permission for ipatool to securely read the Apple ID credentials stored in your Keychain, so you don't have to type them every time.
+- Select **Always Allow** so you only see it once. If you pick **Allow**, macOS may ask again on the next operation — simply pick **Always Allow**.
+
 ## Build from Source
 
 ```bash
