@@ -98,7 +98,9 @@ jobs:
 
           # Sign bundled binaries (innermost → outermost)
           for bin in "${CONTENTS}/Resources/${BUNDLE_NAME}/bin/"*; do
-            codesign --force --options runtime --timestamp --sign "${SIGNING_IDENTITY}" "$bin"
+            codesign --force --options runtime --timestamp \
+              --entitlements AppDowngrader.entitlements \
+              --sign "${SIGNING_IDENTITY}" "$bin"
           done
 
           # Sign main executable
