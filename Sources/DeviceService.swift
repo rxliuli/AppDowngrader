@@ -17,8 +17,8 @@ enum DeviceService {
         return try? JSONSerialization.jsonObject(with: data)
     }
 
-    static func listDeviceUDIDs() async -> [String] {
-        guard let result = try? await Shell.run("ios", arguments: ["list"]),
+    static func listDeviceUDIDs(quiet: Bool = false) async -> [String] {
+        guard let result = try? await Shell.run("ios", arguments: ["list"], quiet: quiet),
               result.succeeded,
               let json = parseJSON(result.stdout) as? [String: Any],
               let list = json["deviceList"] as? [String]

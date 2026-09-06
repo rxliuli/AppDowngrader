@@ -20,7 +20,9 @@ enum AppStoreService {
         if let code = authCode, !code.isEmpty {
             args += ["--auth-code", code]
         }
-        let result = try await Shell.run("ipatool", arguments: args, timeout: 30)
+        // First login may take a few minutes: ipatool downloads & sets up the
+        // SAP/Unicorn runtime on first run, so use a generous timeout.
+        let result = try await Shell.run("ipatool", arguments: args, timeout: 300)
         print("[AppStore] login: exit=\(result.exitCode) stdout=\(result.stdout) stderr=\(result.stderr)")
         // ipatool returns exit=0 with a "message" field when 2FA is needed
         let output = result.stdout

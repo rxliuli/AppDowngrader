@@ -103,10 +103,23 @@ struct SetupView: View {
                 .background(.black.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
                 .textSelection(.enabled)
 
-            Button("Retry") {
-                Task { await state.initialize() }
+            HStack {
+                Button("Retry") {
+                    Task { await state.initialize() }
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button("Open Log Folder") {
+                    Logger.shared.revealInFinder()
+                }
+                .buttonStyle(.bordered)
             }
-            .buttonStyle(.borderedProminent)
+
+            Text("Log: \(Logger.shared.logFilePath)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .padding(.top, 4)
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -248,6 +261,24 @@ struct AuthSheet: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss
 
+    private var isLoggingIn: Bool {
+        if case .loading = state.status { return true }
+        return false
+    }
+
+    @ViewBuilder
+    private var loginStatus: some View {
+        if case .loading(let msg) = state.status {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(msg)
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
+            }
+        }
+    }
+
     var body: some View {
         @Bindable var state = state
 
@@ -274,6 +305,7 @@ struct AuthSheet: View {
 
                 TextField("Verification Code", text: $state.authCode)
                     .textFieldStyle(.roundedBorder)
+                    .disabled(isLoggingIn)
                     .onSubmit { if !state.authCode.isEmpty { Task { await state.login() } } }
 
                 if case .error(let msg) = state.status {
@@ -282,11 +314,13 @@ struct AuthSheet: View {
                         .font(.caption)
                 }
 
+                loginStatus
+
                 Button("Verify") {
                     Task { await state.login() }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(state.authCode.isEmpty)
+                .disabled(state.authCode.isEmpty || isLoggingIn)
             } else {
                 Text("Login with your Apple ID to download apps")
                     .foregroundStyle(.secondary)
@@ -294,9 +328,11 @@ struct AuthSheet: View {
 
                 TextField("Email", text: $state.email)
                     .textFieldStyle(.roundedBorder)
+                    .disabled(isLoggingIn)
 
                 SecureField("Password", text: $state.password)
                     .textFieldStyle(.roundedBorder)
+                    .disabled(isLoggingIn)
                     .onSubmit { if !state.email.isEmpty && !state.password.isEmpty { Task { await state.login() } } }
 
                 if case .error(let msg) = state.status {
@@ -305,15 +341,18 @@ struct AuthSheet: View {
                         .font(.caption)
                 }
 
+                loginStatus
+
                 Button("Login") {
                     Task { await state.login() }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(state.email.isEmpty || state.password.isEmpty)
+                .disabled(state.email.isEmpty || state.password.isEmpty || isLoggingIn)
             }
 
             Button("Close") { dismiss() }
                 .buttonStyle(.bordered)
+                .disabled(isLoggingIn)
         }
         .padding(24)
         .frame(width: 360)

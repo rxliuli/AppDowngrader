@@ -37,7 +37,7 @@ cp Sources/AppIcon.png "${CONTENTS}/Resources/"
 echo "==> Signing app with hardened runtime..."
 # Sign bundled binaries first (innermost → outermost)
 for bin in "${CONTENTS}/Resources/${APP_NAME}_${APP_NAME}.bundle/bin/"*; do
-    codesign --force --sign "${SIGN_ID}" --options runtime "$bin"
+    codesign --force --sign "${SIGN_ID}" --options runtime --entitlements AppDowngrader.entitlements "$bin"
 done
 codesign --force --sign "${SIGN_ID}" --options runtime --entitlements AppDowngrader.entitlements "${APP_BUNDLE}"
 

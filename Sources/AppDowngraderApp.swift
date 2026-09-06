@@ -33,5 +33,13 @@ struct AppDowngraderApp: App {
                 .environment(appState)
                 .frame(minWidth: 700, minHeight: 500)
         }
+        .commands {
+            CommandGroup(after: .help) {
+                Button("Open Log Folder") {
+                    Logger.shared.revealInFinder()
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
+            }
+        }
     }
 }

@@ -75,10 +75,14 @@ class AppState {
     // MARK: - Startup
 
     func initialize() async {
+        Logger.shared.info("App initializing (dependencies / devices / apps)...")
         initPhase = .checkingDependencies
         await checkDependencies()
 
-        guard dependencies.allSatisfied else { return }
+        guard dependencies.allSatisfied else {
+            Logger.shared.error("Missing dependencies: \(dependencies.missingTools.joined(separator: ", "))")
+            return
+        }
 
         initPhase = .checkingAuth
         await checkAuth()
@@ -87,6 +91,7 @@ class AppState {
         await refreshDevices()
 
         initPhase = .ready
+        Logger.shared.info("App initialization complete")
         startDevicePolling()
     }
 
@@ -94,10 +99,11 @@ class AppState {
         devicePollTask?.cancel()
         devicePollTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(3))
+                // Poll quietly (don't spam the log) and only refresh when a device appears/disappears.
+                try? await Task.sleep(for: .seconds(15))
                 guard !Task.isCancelled else { break }
 
-                let udids = await DeviceService.listDeviceUDIDs()
+                let udids = await DeviceService.listDeviceUDIDs(quiet: true)
                 let currentIds = self?.devices.map(\.id) ?? []
 
                 // Only refresh if device list changed
@@ -126,6 +132,7 @@ class AppState {
     private func handleAuthErrorIfNeeded(_ error: Error, retry: @escaping @MainActor () async -> Void) -> Bool {
         let msg = error.localizedDescription
         if Self.looksLikeAuthError(msg) {
+            Logger.shared.warn("Auth error detected, prompting re-login: \(msg)")
             isAuthenticated = false
             authStep = .credentials
             retryAfterLogin = retry
@@ -152,19 +159,22 @@ class AppState {
     }
 
     func login() async {
-        status = .loading("Logging in...")
+        let is2FA = authStep == .twoFactor
+        Logger.shared.info("Login started (\(is2FA ? "2FA verification" : "credentials"))")
+        status = .loading("Preparing authentication, first login may take a few minutes...")
         do {
             // Revoke existing session to clear potentially corrupted state
-            if authStep == .credentials {
+            if !is2FA {
                 await AppStoreService.revoke()
             }
 
             let result = try await AppStoreService.login(
                 email: email, password: password,
-                authCode: authStep == .twoFactor ? authCode : nil
+                authCode: is2FA ? authCode : nil
             )
             switch result {
             case .success:
+                Logger.shared.info("Login succeeded")
                 isAuthenticated = true
                 showAuthSheet = false
                 status = .idle
@@ -178,17 +188,21 @@ class AppState {
                     await retry()
                 }
             case .requires2FA:
+                Logger.shared.info("2FA code required")
                 authStep = .twoFactor
                 status = .idle
             case .failure(let msg):
+                Logger.shared.error("Login failed: \(msg)")
                 status = .error(msg)
             }
         } catch {
+            Logger.shared.error("Login threw: \(error.localizedDescription)")
             status = .error(error.localizedDescription)
         }
     }
 
     func logout() async {
+        Logger.shared.info("Logging out")
         await AppStoreService.revoke()
         isAuthenticated = false
         authStep = .credentials
@@ -299,6 +313,7 @@ class AppState {
     func downloadAndInstall() async {
         guard let app = selectedApp, let device = selectedDevice else { return }
 
+        Logger.shared.info("Download & install \(app.name) (\(app.bundleId)) version=\(effectiveVersionId ?? "latest") to device \(device.id)")
         downloadProgress = 0
         status = .loading("Downloading \(app.name)...")
         do {
@@ -318,6 +333,7 @@ class AppState {
             // Clean up
             try? FileManager.default.removeItem(atPath: ipaPath)
 
+            Logger.shared.info("Successfully installed \(app.name)")
             status = .success("Successfully installed \(app.name)")
             await loadApps(for: device)
             // Update selectedApp to reflect the new installed version
@@ -326,6 +342,7 @@ class AppState {
             }
         } catch {
             downloadProgress = nil
+            Logger.shared.error("Download/install failed: \(error.localizedDescription)")
             if !handleAuthErrorIfNeeded(error, retry: { [weak self] in
                 await self?.downloadAndInstall()
             }) {

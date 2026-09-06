@@ -50,7 +50,8 @@ enum Shell {
         _ command: String,
         arguments: [String],
         timeout: TimeInterval,
-        onStdout: (@Sendable (String) -> Void)? = nil
+        onStdout: (@Sendable (String) -> Void)? = nil,
+        quiet: Bool = false
     ) async throws -> ShellResult {
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()
@@ -117,15 +118,31 @@ enum Shell {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 dataLock.unlock()
 
+                if !quiet {
+                    Logger.shared.shellDone(
+                        command,
+                        arguments: process.arguments ?? arguments,
+                        stdout: stdout,
+                        stderr: stderr,
+                        exitCode: proc.terminationStatus
+                    )
+                }
+
                 resumeOnce(with: .success(ShellResult(
                     stdout: stdout, stderr: stderr, exitCode: proc.terminationStatus
                 )))
             }
 
             do {
+                if !quiet {
+                    Logger.shared.shellStart(command, arguments: process.arguments ?? arguments)
+                }
                 try process.run()
             } catch {
                 timeoutWork.cancel()
+                if !quiet {
+                    Logger.shared.error("failed to run \(command): \(error.localizedDescription)")
+                }
                 resumeOnce(with: .failure(error))
             }
         }
@@ -134,9 +151,10 @@ enum Shell {
     static func run(
         _ command: String,
         arguments: [String] = [],
-        timeout: TimeInterval = 15
+        timeout: TimeInterval = 15,
+        quiet: Bool = false
     ) async throws -> ShellResult {
-        try await execute(command, arguments: arguments, timeout: timeout)
+        try await execute(command, arguments: arguments, timeout: timeout, quiet: quiet)
     }
 
     /// Run a long-running command with real-time stdout streaming.
