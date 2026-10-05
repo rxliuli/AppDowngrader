@@ -71,7 +71,11 @@ jobs:
           echo "$APPLE_API_KEY" | base64 --decode > ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8
 
       - name: Build release
-        run: swift build -c release
+        # --build-system native: the default "swiftbuild" engine auto-strips unsigned
+        # bundled binaries during resource copy, which crashes on the Go-built
+        # ipatool/ios binaries ("symbols referenced by indirect symbol table entries
+        # that can't be stripped"). The native build system skips that step.
+        run: swift build -c release --build-system native
 
       - name: Create app bundle
         run: |

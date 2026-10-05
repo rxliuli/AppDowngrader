@@ -22,7 +22,11 @@ fi
 echo "==> Using identity: ${SIGN_ID}"
 
 echo "==> Building release..."
-swift build -c release 2>&1 | grep -E "Build complete|error:"
+# --build-system native: the default "swiftbuild" engine auto-strips unsigned
+# bundled binaries during resource copy, which crashes on the Go-built
+# ipatool/ios binaries ("symbols referenced by indirect symbol table entries
+# that can't be stripped"). The native build system skips that step.
+swift build -c release --build-system native 2>&1 | grep -E "Build complete|error:"
 
 echo "==> Creating app bundle..."
 rm -rf dist
