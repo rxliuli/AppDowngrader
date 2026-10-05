@@ -23,8 +23,8 @@ settings:
     SWIFT_VERSION: "5.0"
     # 版本号真相在根目录 Info.plist（发版 CI 读它判断要不要发）；
     # 这里只服务于本机 archive，发版时由 release.yml 覆盖。
-    MARKETING_VERSION: "0.0.5"
-    CURRENT_PROJECT_VERSION: "5"
+    MARKETING_VERSION: "0.0.6"
+    CURRENT_PROJECT_VERSION: "6"
     DEAD_CODE_STRIPPING: YES
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: N2X78TUUFG
