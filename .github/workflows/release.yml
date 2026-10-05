@@ -45,126 +45,41 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Setup certificates
-        env:
-          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_DEVELOPERID_BASE64 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_DEVELOPERID_PASSWORD }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      # .xcodeproj 是 xcodegen 的产物（已在 .gitignore 里），CI 上必须现生成。
+      # 之前这里提交过一份手工维护的 pbxproj，它腐烂了 —— 后加的 Logger.swift
+      # 没人同步进去，archive 直接报 cannot find 'Logger' in scope。
+      - name: Generate Xcode project
         run: |
-          # Create keychain
-          security create-keychain -p actions $RUNNER_TEMP/app-signing.keychain-db
-          security set-keychain-settings -lut 21600 $RUNNER_TEMP/app-signing.keychain-db
-          security unlock-keychain -p actions $RUNNER_TEMP/app-signing.keychain-db
-          security default-keychain -s $RUNNER_TEMP/app-signing.keychain-db
+          brew install xcodegen
+          xcodegen generate
 
-          # Import Developer ID certificate
-          echo "$CERTIFICATE_BASE64" | base64 --decode > $RUNNER_TEMP/cert.p12
-          security import $RUNNER_TEMP/cert.p12 -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $RUNNER_TEMP/app-signing.keychain-db
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions $RUNNER_TEMP/app-signing.keychain-db
+      # archive → Developer ID 签名（含内容里的 ipatool / go-ios）→ DMG →
+      # 公证 → 盖章 → Gatekeeper 校验。规则与「为什么」都在共享 action 那边：
+      # https://github.com/rxliuli/apple-release
+      # 内置的两个第三方可执行文件由 project.yml 的 "Sign bundled binaries"
+      # 脚本阶段负责签名（应用运行时要调用它们，公证要求每个 Mach-O 都带有效签名）。
+      - uses: rxliuli/apple-release/dmg@v1
+        id: dmg
+        with:
+          project: AppDowngrader.xcodeproj
+          scheme: AppDowngrader
+          version: ${{ needs.check-version.outputs.version }}
+          certificate-base64: ${{ secrets.APPLE_CERTIFICATE_DEVELOPERID_BASE64 }}
+          certificate-password: ${{ secrets.APPLE_CERTIFICATE_DEVELOPERID_PASSWORD }}
+          api-key: ${{ secrets.APPLE_API_KEY }}
+          api-key-id: ${{ secrets.APPLE_API_KEY_ID }}
+          api-issuer: ${{ secrets.APPLE_API_ISSUER }}
 
-          # Verify
-          security find-identity -v -p codesigning $RUNNER_TEMP/app-signing.keychain-db
-
-          # Setup API key for notarization
-          mkdir -p ~/private_keys
-          echo "$APPLE_API_KEY" | base64 --decode > ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8
-
-      - name: Build release
-        # --build-system native: the default "swiftbuild" engine auto-strips unsigned
-        # bundled binaries during resource copy, which crashes on the Go-built
-        # ipatool/ios binaries ("symbols referenced by indirect symbol table entries
-        # that can't be stripped"). The native build system skips that step.
-        run: swift build -c release --build-system native
-
-      - name: Create app bundle
-        run: |
-          APP_NAME="AppDowngrader"
-          BUILD_DIR=".build/release"
-          APP_BUNDLE="dist/${APP_NAME}.app"
-          CONTENTS="${APP_BUNDLE}/Contents"
-
-          mkdir -p "${CONTENTS}/MacOS"
-          mkdir -p "${CONTENTS}/Resources"
-
-          cp "${BUILD_DIR}/${APP_NAME}" "${CONTENTS}/MacOS/"
-          cp -R "${BUILD_DIR}/${APP_NAME}_${APP_NAME}.bundle" "${CONTENTS}/Resources/"
-          cp Info.plist "${CONTENTS}/"
-          cp Sources/AppIcon.png "${CONTENTS}/Resources/"
-
-      - name: Sign app
-        env:
-          SIGNING_IDENTITY: ${{ vars.SIGNING_IDENTITY_DMG }}
-        run: |
-          APP_BUNDLE="dist/AppDowngrader.app"
-          CONTENTS="${APP_BUNDLE}/Contents"
-          BUNDLE_NAME="AppDowngrader_AppDowngrader.bundle"
-
-          # Sign bundled binaries (innermost → outermost)
-          for bin in "${CONTENTS}/Resources/${BUNDLE_NAME}/bin/"*; do
-            codesign --force --options runtime --timestamp \
-              --entitlements AppDowngrader.entitlements \
-              --sign "${SIGNING_IDENTITY}" "$bin"
-          done
-
-          # Sign main executable
-          codesign --force --options runtime --timestamp \
-            --entitlements AppDowngrader.entitlements \
-            --sign "${SIGNING_IDENTITY}" \
-            "${CONTENTS}/MacOS/AppDowngrader"
-
-          # Sign app bundle
-          codesign --force --options runtime --timestamp \
-            --entitlements AppDowngrader.entitlements \
-            --sign "${SIGNING_IDENTITY}" \
-            "${APP_BUNDLE}"
-
-          # Verify
-          codesign --verify --deep --strict --verbose=2 "${APP_BUNDLE}"
-
-      - name: Create DMG
-        run: |
-          brew install create-dmg
-          create-dmg \
-            --volname "AppDowngrader" \
-            --window-pos 200 120 \
-            --window-size 660 400 \
-            --icon-size 100 \
-            --icon "AppDowngrader.app" 180 170 \
-            --hide-extension "AppDowngrader.app" \
-            --app-drop-link 480 170 \
-            --codesign "${{ vars.SIGNING_IDENTITY_DMG }}" \
-            "AppDowngrader-macos.dmg" \
-            "dist/AppDowngrader.app"
-
-      - name: Notarize DMG
-        env:
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        run: |
-          xcrun notarytool submit "AppDowngrader-macos.dmg" \
-            --key ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8 \
-            --key-id "${APPLE_API_KEY_ID}" \
-            --issuer "${APPLE_API_ISSUER}" \
-            --wait
-
-          xcrun stapler staple "AppDowngrader-macos.dmg"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
-          path: AppDowngrader-macos.dmg
-
-      - name: Cleanup keychain
-        if: always()
-        run: security delete-keychain $RUNNER_TEMP/app-signing.keychain-db
+          path: ${{ steps.dmg.outputs.dmg-path }}
 
   release:
     needs: [check-version, build-macos-dmg]
     runs-on: ubuntu-latest
-    # TAP_GITHUB_TOKEN 是可选配置：没配就跳过 cask bump。secrets 不能出现在 if 条件里
-    # （secrets context 在 steps.if 不可用），所以先落到 job 级 env，再用 env.TAP_TOKEN 判断。
+    # TAP_GITHUB_TOKEN 是可选的：没配就跳过 cask bump。secrets 不能出现在 if 条件里
+    # （steps.if 拿不到 secrets context），所以先落到 job 级 env，再用 env.TAP_TOKEN 判断。
     env:
       TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
     steps:
@@ -187,8 +102,8 @@ jobs:
             --generate-notes \
             artifacts/*
 
-      # 只改 tap 里 cask 的 version / sha256 两行，livecheck / caveats / zap 原样保留。
-      # 改不动（cask 格式变了）会直接失败，不像手写 sed 那样静默通过。
+      # 只改 tap 里 cask 的 version / sha256 两行，livecheck / caveats / zap 原样保留；
+      # 改不动会直接失败，不像手写 sed 那样静默通过。
       - name: Update Homebrew tap
         if: env.TAP_TOKEN != ''
         uses: rxliuli/apple-release/tap-update@v1

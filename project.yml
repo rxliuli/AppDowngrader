@@ -1,0 +1,102 @@
+name: AppDowngrader
+
+# .xcodeproj 的唯一真相来源（生成物在 .gitignore 里）。
+# 之前仓库里提交过一份手工维护的 AppDowngrader.xcodeproj，它腐烂了：
+# 后加的 Logger.swift 没人同步进去，xcodebuild archive 直接报
+# "cannot find 'Logger' in scope"，而 MARKETING_VERSION 还停在 0.0.1。
+# project.yml 是文本、可 review、加文件不用同步，所以换成 xcodegen。
+#
+# 为什么需要一个 .xcodeproj 而不只用 Package.swift：SwiftPM 是库/CLI 的构建系统，
+# 它不产出 .app —— 没有 bundle 布局、没有 Info.plist 落位、没有签名/公证。
+# 而且把 Go 编译的第三方可执行文件塞进 SPM resources（.copy("bin")）会额外惹两个麻烦：
+# 释放构建时 strip 崩溃、以及资源要按 Package_Target.bundle 那层去找。
+# Package.swift 保留给 `swift run` 的日常开发（本机 PATH 上有 ipatool / ios）。
+
+options:
+  bundleIdPrefix: com.rxliuli
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    # 版本号真相在根目录 Info.plist（发版 CI 读它判断要不要发）；
+    # 这里只服务于本机 archive，发版时由 release.yml 覆盖。
+    MARKETING_VERSION: "0.0.5"
+    CURRENT_PROJECT_VERSION: "5"
+    DEAD_CODE_STRIPPING: YES
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: N2X78TUUFG
+
+targets:
+  AppDowngrader:
+    type: application
+    platform: macOS
+    sources:
+      # 排除两个非源码项：它们分别由下面的 folder reference / 单文件资源处理
+      - path: Sources
+        excludes:
+          - bin
+          - AppIcon.png
+      # 内置的第三方可执行文件（Go 编译的 ipatool / go-ios），应用在运行时调用。
+      # 必须是 folder reference（type: folder）—— 用 group 的话 Xcode 会把里面的
+      # 文件平铺进 Contents/Resources 根目录，而应用按 .../Resources/bin/<cmd> 查找。
+      - path: Sources/bin
+        type: folder
+        buildPhase: resources
+      # CFBundleIconFile=AppIcon，同时应用启动时用它设置 Dock 图标
+      - path: Sources/AppIcon.png
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_NAME: AppDowngrader
+        # 刻意用构建设置而不是 XcodeGen 的 `entitlements:` 块：后者会按
+        # properties 重新生成那个文件，而这里没写 properties，结果是把
+        # AppDowngrader.entitlements 重写成空 <dict/>，静默抹掉
+        # allow-jit / disable-library-validation —— 运行时表现是 SAP 登录时
+        # dlopen Unicorn 被 hardened runtime 拦下。entitlements 文件保持为
+        # 仓库里的普通文件，由 Xcode 原样使用。
+        CODE_SIGN_ENTITLEMENTS: AppDowngrader.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: com.rxliuli.AppDowngrader
+        INFOPLIST_FILE: Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        # 下面的脚本阶段要往 .app 里写文件再签名，脚本沙盒会拦住它
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+    postBuildScripts:
+      - name: Sign bundled binaries
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+
+          # Xcode 会把 .app 整体签名，但它不认识 bin/ 里这两个第三方可执行文件：
+          # 它们不是构建产物、也不在 Frameworks 里。公证要求**每一个** Mach-O 都带
+          # 有效签名，所以必须在这一步手动签，而且顺序是由内到外 —— 先签内层，
+          # 外层 .app 的封印才会把这些文件的哈希一起算进去。
+
+          IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY:-${CODE_SIGN_IDENTITY:-}}"
+          if [ -z "${IDENTITY}" ]; then
+            echo "error: 拿不到签名身份（EXPANDED_CODE_SIGN_IDENTITY / CODE_SIGN_IDENTITY 都是空的）"
+            exit 1
+          fi
+
+          APP="${CODESIGNING_FOLDER_PATH:-${TARGET_BUILD_DIR}/${WRAPPER_NAME}}"
+          BIN_DIR="${APP}/Contents/Resources/bin"
+          if [ ! -d "${BIN_DIR}" ]; then
+            echo "error: 找不到 ${BIN_DIR} —— Sources/bin 没有被当作 folder reference 拷进 Contents/Resources？"
+            exit 1
+          fi
+
+          # 与 .app 用同一份 entitlements：ipatool 要 dlopen Unicorn 运行时（JIT），
+          # 少了 disable-library-validation / allow-jit 会在运行时被 hardened runtime 拦下。
+          for bin in "${BIN_DIR}"/*; do
+            echo "==> signing $(basename "${bin}")"
+            codesign --force --options runtime --timestamp \
+              --entitlements "${SRCROOT}/AppDowngrader.entitlements" \
+              --sign "${IDENTITY}" "${bin}"
+          done
+
+          for bin in "${BIN_DIR}"/*; do
+            codesign --verify --strict --verbose=2 "${bin}"
+          done

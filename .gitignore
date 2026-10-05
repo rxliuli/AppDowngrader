@@ -4,3 +4,6 @@
 .claude/
 dist/
 .DS_Store
+
+# xcodegen 的产物（之前那份手工维护的已删除）
+AppDowngrader.xcodeproj
