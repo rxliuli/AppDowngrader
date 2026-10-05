@@ -163,6 +163,10 @@ jobs:
   release:
     needs: [check-version, build-macos-dmg]
     runs-on: ubuntu-latest
+    # TAP_GITHUB_TOKEN 是可选配置：没配就跳过 cask bump。secrets 不能出现在 if 条件里
+    # （secrets context 在 steps.if 不可用），所以先落到 job 级 env，再用 env.TAP_TOKEN 判断。
+    env:
+      TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v6
 
@@ -183,21 +187,13 @@ jobs:
             --generate-notes \
             artifacts/*
 
+      # 只改 tap 里 cask 的 version / sha256 两行，livecheck / caveats / zap 原样保留。
+      # 改不动（cask 格式变了）会直接失败，不像手写 sed 那样静默通过。
       - name: Update Homebrew tap
-        env:
-          TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
-        run: |
-          if [[ -z "${TAP_TOKEN}" ]]; then
-            echo "TAP_GITHUB_TOKEN not set, skipping tap update"
-            exit 0
-          fi
-          VERSION="${{ needs.check-version.outputs.version }}"
-          SHA256=$(sha256sum artifacts/AppDowngrader-macos.dmg | cut -d' ' -f1)
-          git clone "https://x-access-token:${TAP_TOKEN}@github.com/rxliuli/homebrew-tap.git" tap
-          cd tap
-          sed -i -E "s/version \"[^\"]+\"/version \"${VERSION}\"/" Casks/app-downgrader.rb
-          sed -i -E "s/sha256 \"[^\"]+\"/sha256 \"${SHA256}\"/" Casks/app-downgrader.rb
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -am "chore: bump app-downgrader to v${VERSION}"
-          git push
+        if: env.TAP_TOKEN != ''
+        uses: rxliuli/apple-release/tap-update@v1
+        with:
+          cask: app-downgrader
+          version: ${{ needs.check-version.outputs.version }}
+          artifact: artifacts/AppDowngrader-macos.dmg
+          token: ${{ env.TAP_TOKEN }}
