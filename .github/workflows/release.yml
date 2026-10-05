@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
     paths:
-      - 'Info.plist'
+      # The single source of truth for the version is MARKETING_VERSION in project.yml
+      - 'project.yml'
 
 permissions:
   contents: write
@@ -18,23 +19,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          # Must be >= 2: version-check reads the previous commit to compare against
           fetch-depth: 2
+      # The version is read from settings.base.MARKETING_VERSION in project.yml (Info.plist
+      # holds a $(MARKETING_VERSION) template). This action understands XcodeGen specs natively,
+      # so the path is located automatically.
       - id: version
-        run: |
-          read_version() {
-            python3 -c "import plistlib,sys;print(plistlib.load(open(sys.argv[1],'rb'))['CFBundleShortVersionString'])" "$1"
-          }
-          CURRENT=$(read_version Info.plist)
-          PREVIOUS=""
-          if git show HEAD~1:Info.plist > /tmp/prev.plist 2>/dev/null; then
-            PREVIOUS=$(read_version /tmp/prev.plist || true)
-          fi
-          echo "version=${CURRENT}" >> "$GITHUB_OUTPUT"
-          if [[ "${CURRENT}" != "${PREVIOUS}" ]]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
+        uses: rxliuli/version-check@v1
+        with:
+          file: project.yml
 
   build-macos-dmg:
     needs: check-version
@@ -45,19 +38,21 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # .xcodeproj 是 xcodegen 的产物（已在 .gitignore 里），CI 上必须现生成。
-      # 之前这里提交过一份手工维护的 pbxproj，它腐烂了 —— 后加的 Logger.swift
-      # 没人同步进去，archive 直接报 cannot find 'Logger' in scope。
+      # .xcodeproj is a xcodegen product (gitignored), so CI has to generate it.
+      # The repo used to commit a hand-maintained pbxproj and it rotted - a later Logger.swift
+      # was never synced into it and archive failed with cannot find 'Logger' in scope.
       - name: Generate Xcode project
         run: |
           brew install xcodegen
           xcodegen generate
 
-      # archive → Developer ID 签名（含内容里的 ipatool / go-ios）→ DMG →
-      # 公证 → 盖章 → Gatekeeper 校验。规则与「为什么」都在共享 action 那边：
+      # archive -> Developer ID sign (including the bundled ipatool / go-ios) -> DMG ->
+      # notarize -> staple -> Gatekeeper check. The rules and the reasoning behind them live in
+      # the shared action:
       # https://github.com/rxliuli/apple-release
-      # 内置的两个第三方可执行文件由 project.yml 的 "Sign bundled binaries"
-      # 脚本阶段负责签名（应用运行时要调用它们，公证要求每个 Mach-O 都带有效签名）。
+      # The two bundled third-party executables are signed by the "Sign bundled binaries" script
+      # phase in project.yml (the app invokes them at runtime, and notarization requires every
+      # Mach-O to carry a valid signature).
       - uses: rxliuli/apple-release/dmg@v1
         id: dmg
         with:
@@ -78,8 +73,9 @@ jobs:
   release:
     needs: [check-version, build-macos-dmg]
     runs-on: ubuntu-latest
-    # TAP_GITHUB_TOKEN 是可选的：没配就跳过 cask bump。secrets 不能出现在 if 条件里
-    # （steps.if 拿不到 secrets context），所以先落到 job 级 env，再用 env.TAP_TOKEN 判断。
+    # TAP_GITHUB_TOKEN is optional: when it is not set the cask bump is skipped. `secrets` cannot
+    # be used in an `if` condition (the secrets context is unavailable in steps.if), so it goes
+    # through a job-level env and the step tests env.TAP_TOKEN instead.
     env:
       TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
     steps:
@@ -102,8 +98,9 @@ jobs:
             --generate-notes \
             artifacts/*
 
-      # 只改 tap 里 cask 的 version / sha256 两行，livecheck / caveats / zap 原样保留；
-      # 改不动会直接失败，不像手写 sed 那样静默通过。
+      # Rewrites only the cask's version / sha256 lines and leaves livecheck / caveats / zap
+      # alone; if it cannot rewrite them it fails loudly, unlike a hand-written sed that would
+      # silently succeed.
       - name: Update Homebrew tap
         if: env.TAP_TOKEN != ''
         uses: rxliuli/apple-release/tap-update@v1

@@ -1,16 +1,17 @@
 name: AppDowngrader
 
-# .xcodeproj 的唯一真相来源（生成物在 .gitignore 里）。
-# 之前仓库里提交过一份手工维护的 AppDowngrader.xcodeproj，它腐烂了：
-# 后加的 Logger.swift 没人同步进去，xcodebuild archive 直接报
-# "cannot find 'Logger' in scope"，而 MARKETING_VERSION 还停在 0.0.1。
-# project.yml 是文本、可 review、加文件不用同步，所以换成 xcodegen。
+# The single source of truth for the .xcodeproj (the generated one is gitignored).
+# The repo used to commit a hand-maintained AppDowngrader.xcodeproj and it rotted: a later
+# Logger.swift was never synced into it, so xcodebuild archive failed with
+# "cannot find 'Logger' in scope", and MARKETING_VERSION was still 0.0.1.
+# project.yml is text, reviewable, and needs no syncing when files are added - hence xcodegen.
 #
-# 为什么需要一个 .xcodeproj 而不只用 Package.swift：SwiftPM 是库/CLI 的构建系统，
-# 它不产出 .app —— 没有 bundle 布局、没有 Info.plist 落位、没有签名/公证。
-# 而且把 Go 编译的第三方可执行文件塞进 SPM resources（.copy("bin")）会额外惹两个麻烦：
-# 释放构建时 strip 崩溃、以及资源要按 Package_Target.bundle 那层去找。
-# Package.swift 保留给 `swift run` 的日常开发（本机 PATH 上有 ipatool / ios）。
+# Why an .xcodeproj at all, rather than just Package.swift: SwiftPM is a build system for
+# libraries and CLIs, and it does not produce a .app - no bundle layout, no Info.plist
+# placement, no signing, no notarization. And putting Go-built third-party executables inside
+# SPM resources (.copy("bin")) drags in two extra problems: a strip crash during release
+# builds, and resources having to be looked up through Package_Target.bundle.
+# Package.swift stays for day-to-day `swift run` (ipatool / ios are on PATH locally).
 
 options:
   bundleIdPrefix: com.rxliuli
@@ -21,9 +22,14 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    # 版本号真相在根目录 Info.plist（发版 CI 读它判断要不要发）；
-    # 这里只服务于本机 archive，发版时由 release.yml 覆盖。
+    # The **single source of truth** for the version is right here: the Info.plist at the repo
+    # root holds $(MARKETING_VERSION) / $(CURRENT_PROJECT_VERSION), substituted by Xcode at build
+    # time. The release CI reads this file with rxliuli/version-check to decide whether to
+    # publish, so a version bump is a one-line change here and nowhere else.
     MARKETING_VERSION: "0.0.6"
+    # The build number is derived from the version as x*10000 + y*100 + z (0.0.6 -> 6).
+    # dmg.sh computes the same value in CI and overrides this; the value here only serves local
+    # archives.
     CURRENT_PROJECT_VERSION: "6"
     DEAD_CODE_STRIPPING: YES
     CODE_SIGN_STYLE: Automatic
@@ -34,35 +40,38 @@ targets:
     type: application
     platform: macOS
     sources:
-      # 排除两个非源码项：它们分别由下面的 folder reference / 单文件资源处理
+      # Exclude the two non-source items: they are handled by the folder reference / the single
+      # resource file below
       - path: Sources
         excludes:
           - bin
           - AppIcon.png
-      # 内置的第三方可执行文件（Go 编译的 ipatool / go-ios），应用在运行时调用。
-      # 必须是 folder reference（type: folder）—— 用 group 的话 Xcode 会把里面的
-      # 文件平铺进 Contents/Resources 根目录，而应用按 .../Resources/bin/<cmd> 查找。
+      # The bundled third-party executables (Go-built ipatool / go-ios), invoked by the app at
+      # runtime. This has to be a folder reference (type: folder) - with a group, Xcode flattens
+      # the files into the root of Contents/Resources, while the app looks them up under
+      # .../Resources/bin/<cmd>.
       - path: Sources/bin
         type: folder
         buildPhase: resources
-      # CFBundleIconFile=AppIcon，同时应用启动时用它设置 Dock 图标
+      # CFBundleIconFile=AppIcon, and the app also uses it to set the Dock icon at launch
       - path: Sources/AppIcon.png
         buildPhase: resources
     settings:
       base:
         PRODUCT_NAME: AppDowngrader
-        # 刻意用构建设置而不是 XcodeGen 的 `entitlements:` 块：后者会按
-        # properties 重新生成那个文件，而这里没写 properties，结果是把
-        # AppDowngrader.entitlements 重写成空 <dict/>，静默抹掉
-        # allow-jit / disable-library-validation —— 运行时表现是 SAP 登录时
-        # dlopen Unicorn 被 hardened runtime 拦下。entitlements 文件保持为
-        # 仓库里的普通文件，由 Xcode 原样使用。
+        # Deliberately a build setting rather than XcodeGen's `entitlements:` block: that block
+        # regenerates the file from `properties`, and with no properties given it rewrote
+        # AppDowngrader.entitlements into an empty <dict/>, silently dropping allow-jit /
+        # disable-library-validation - whose runtime symptom is SAP login failing because dlopen
+        # of Unicorn is blocked by the hardened runtime. The entitlements file stays a normal file
+        # in the repo and Xcode uses it as-is.
         CODE_SIGN_ENTITLEMENTS: AppDowngrader.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: com.rxliuli.AppDowngrader
         INFOPLIST_FILE: Info.plist
         GENERATE_INFOPLIST_FILE: NO
         ENABLE_HARDENED_RUNTIME: YES
-        # 下面的脚本阶段要往 .app 里写文件再签名，脚本沙盒会拦住它
+        # The script phase below writes files into the .app and signs them; script sandboxing
+        # would block that
         ENABLE_USER_SCRIPT_SANDBOXING: NO
     postBuildScripts:
       - name: Sign bundled binaries
@@ -70,26 +79,28 @@ targets:
         script: |
           set -euo pipefail
 
-          # Xcode 会把 .app 整体签名，但它不认识 bin/ 里这两个第三方可执行文件：
-          # 它们不是构建产物、也不在 Frameworks 里。公证要求**每一个** Mach-O 都带
-          # 有效签名，所以必须在这一步手动签，而且顺序是由内到外 —— 先签内层，
-          # 外层 .app 的封印才会把这些文件的哈希一起算进去。
+          # Xcode signs the .app as a whole, but it does not know about the two third-party
+          # executables in bin/: they are not build products and they are not in Frameworks.
+          # Notarization requires **every** Mach-O to carry a valid signature, so they have to be
+          # signed by hand here, inside-out - inner layers first, so that the outer .app's seal
+          # covers their hashes too.
 
           IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY:-${CODE_SIGN_IDENTITY:-}}"
           if [ -z "${IDENTITY}" ]; then
-            echo "error: 拿不到签名身份（EXPANDED_CODE_SIGN_IDENTITY / CODE_SIGN_IDENTITY 都是空的）"
+            echo "error: no signing identity available (both EXPANDED_CODE_SIGN_IDENTITY and CODE_SIGN_IDENTITY are empty)"
             exit 1
           fi
 
           APP="${CODESIGNING_FOLDER_PATH:-${TARGET_BUILD_DIR}/${WRAPPER_NAME}}"
           BIN_DIR="${APP}/Contents/Resources/bin"
           if [ ! -d "${BIN_DIR}" ]; then
-            echo "error: 找不到 ${BIN_DIR} —— Sources/bin 没有被当作 folder reference 拷进 Contents/Resources？"
+            echo "error: ${BIN_DIR} not found - was Sources/bin not copied into Contents/Resources as a folder reference?"
             exit 1
           fi
 
-          # 与 .app 用同一份 entitlements：ipatool 要 dlopen Unicorn 运行时（JIT），
-          # 少了 disable-library-validation / allow-jit 会在运行时被 hardened runtime 拦下。
+          # Same entitlements as the .app: ipatool has to dlopen the Unicorn runtime (JIT), and
+          # without disable-library-validation / allow-jit the hardened runtime blocks it at
+          # runtime.
           for bin in "${BIN_DIR}"/*; do
             echo "==> signing $(basename "${bin}")"
             codesign --force --options runtime --timestamp \
