@@ -26,11 +26,11 @@ settings:
     # root holds $(MARKETING_VERSION) / $(CURRENT_PROJECT_VERSION), substituted by Xcode at build
     # time. The release CI reads this file with rxliuli/version-check to decide whether to
     # publish, so a version bump is a one-line change here and nowhere else.
-    MARKETING_VERSION: "0.0.6"
-    # The build number is derived from the version as x*10000 + y*100 + z (0.0.6 -> 6).
+    MARKETING_VERSION: "0.0.7"
+    # The build number is derived from the version as x*10000 + y*100 + z (0.0.7 -> 7).
     # dmg.sh computes the same value in CI and overrides this; the value here only serves local
     # archives.
-    CURRENT_PROJECT_VERSION: "6"
+    CURRENT_PROJECT_VERSION: "7"
     DEAD_CODE_STRIPPING: YES
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: N2X78TUUFG
