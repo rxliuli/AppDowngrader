@@ -38,6 +38,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # ipatool / go-ios are not committed (see scripts/binaries.json): ~35-107MB each, and the
+      # universal ipatool alone is over GitHub's 100MiB per-file limit. They are fetched here
+      # instead, from pinned urls with per-archive sha256 verification. The cache key includes
+      # the script as well as the manifest, so a bump re-downloads and a no-op run does not.
+      - name: Cache bundled tools
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/AppDowngrader/bin
+          key: binaries-${{ hashFiles('scripts/binaries.json', 'scripts/fetch-bin.sh') }}
+
+      - name: Fetch bundled tools
+        run: bash scripts/fetch-bin.sh
+
       # .xcodeproj is a xcodegen product (gitignored), so CI has to generate it.
       # The repo used to commit a hand-maintained pbxproj and it rotted - a later Logger.swift
       # was never synced into it and archive failed with cannot find 'Logger' in scope.

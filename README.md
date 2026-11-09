@@ -43,14 +43,24 @@ This is normal and safe:
 ## Build from Source
 
 ```bash
+# Bundle the third-party tools (ipatool, go-ios). They are not committed: this downloads
+# them from the pinned urls in scripts/binaries.json and verifies each sha256. Re-running
+# is a cache hit, and a version bump is a manifest edit.
+bash scripts/fetch-bin.sh
+
 # Run in development
 swift run
-
-# Build release .app + signed DMG (requires Developer ID certificate)
-bash scripts/package.sh
 ```
 
+Release builds (Developer ID archive → notarized DMG → Homebrew cask) run in CI:
+`.github/workflows/release.yml` archives with xcodegen + `rxliuli/apple-release/dmg`, which
+needs the signing secrets from the `release-macOS` environment.
+
 Or open `AppDowngrader.xcodeproj` in Xcode for Archive and notarization.
+
+Without `scripts/fetch-bin.sh` the app refuses to run either tool (it used to fall back to
+whatever was on `PATH`, which silently picked a stale Homebrew build), so a source build
+without that step lands on the "Missing Bundled Tools" screen.
 
 ## Limitations
 

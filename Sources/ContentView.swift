@@ -82,10 +82,10 @@ struct SetupView: View {
                 .font(.system(size: 48))
                 .foregroundStyle(.yellow)
 
-            Text("Missing Dependencies")
+            Text("Missing Bundled Tools")
                 .font(.title2.bold())
 
-            Text("Install the following tools via Homebrew:")
+            Text("This build is missing tools it is supposed to ship with.")
                 .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 8) {
@@ -97,7 +97,7 @@ struct SetupView: View {
             .padding()
             .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
 
-            Text("brew install ipatool && npm install -g go-ios")
+            Text("Reinstall AppDowngrader, or if you built it from source: bash scripts/fetch-bin.sh")
                 .font(.system(.body, design: .monospaced))
                 .padding(8)
                 .background(.black.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))

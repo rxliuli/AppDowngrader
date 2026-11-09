@@ -7,3 +7,10 @@ dist/
 
 # xcodegen 的产物（之前那份手工维护的已删除）
 AppDowngrader.xcodeproj
+
+# 第三方可执行文件不再入库：每个 35-107MB，GitHub 单文件上限 100MiB，且每升一次
+# ipatool 就是一份新的历史垃圾。由 scripts/fetch-bin.sh 按 scripts/binaries.json
+# 下载 + 校验 sha256 后生成；.gitkeep 保证 xcodegen 的 folder reference 与 SwiftPM
+# 的 .copy("bin") 仍有目录可指。
+Sources/bin/*
+!Sources/bin/.gitkeep

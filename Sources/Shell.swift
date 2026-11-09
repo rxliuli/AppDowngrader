@@ -23,16 +23,33 @@ struct ShellResult {
 }
 
 enum Shell {
-    /// Resolve a command to a full path: bundled binary > PATH lookup.
-    private static func resolveCommand(_ command: String) -> (url: URL, isBundled: Bool) {
-        // Check for bundled binary in app resources
-        if let bundledURL = resourceBundle.url(forResource: command, withExtension: nil, subdirectory: "bin") {
-            return (bundledURL, true)
+    enum ShellError: LocalizedError {
+        case notBundled(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .notBundled(let command):
+                return "\(command) is missing from the app bundle "
+                    + "(Contents/Resources/bin), so there is nothing to run. "
+                    + "Developers: run `bash scripts/fetch-bin.sh` before building. "
+                    + "Everyone else: reinstall AppDowngrader - it ships its own copy."
+            }
         }
-        // Fallback: use /usr/bin/env to find on PATH
-        return (URL(fileURLWithPath: "/usr/bin/env"), false)
     }
 
+    /// Where a bundled tool lives inside the app.
+    ///
+    /// There is deliberately **no** PATH fallback. Running whatever `ipatool` happened to be
+    /// installed looked identical to working code, and a stale Homebrew ipatool (2.3.0 at the
+    /// time of writing) reads the same keychain entry, so the UI could say "logged in" while
+    /// every request went out over an older protocol - and its errors look nothing like the
+    /// bundled one's. A missing binary now means a broken bundle, not "use something else".
+    private static func bundledURL(_ command: String) -> URL? {
+        resourceBundle.url(forResource: command, withExtension: nil, subdirectory: "bin")
+    }
+
+    /// Environment for the child process. The PATH entries below are inherited by whatever the
+    /// tool spawns - they are *not* a lookup path for the tool itself (see `bundledURL(_:)`).
     private static func makeEnv() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         let home = env["HOME"] ?? "/Users/\(NSUserName())"
@@ -54,16 +71,21 @@ enum Shell {
         quiet: Bool = false
     ) async throws -> ShellResult {
         try await withCheckedThrowingContinuation { continuation in
+            guard let executable = bundledURL(command) else {
+                continuation.resume(throwing: ShellError.notBundled(command))
+                return
+            }
+
             let process = Process()
             let stdoutPipe = Pipe()
             let stderrPipe = Pipe()
 
-            let resolved = resolveCommand(command)
-            process.executableURL = resolved.url
-            process.arguments = resolved.isBundled ? arguments : [command] + arguments
+            process.executableURL = executable
+            process.arguments = arguments
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
             process.environment = makeEnv()
+
 
             let lock = NSLock()
             var hasResumed = false
@@ -169,14 +191,10 @@ enum Shell {
         )
     }
 
+    /// Only ever answers for the bundled copy - see `bundledURL(_:)` for why there is no
+    /// PATH probe here either.
     static func which(_ command: String) async -> Bool {
-        // Check bundled binary first
-        if resourceBundle.url(forResource: command, withExtension: nil, subdirectory: "bin") != nil {
-            return true
-        }
-        guard let result = try? await run("which", arguments: [command], timeout: 5)
-        else { return false }
-        return result.succeeded
+        bundledURL(command) != nil
     }
 }
 
