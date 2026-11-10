@@ -14,7 +14,93 @@ enum AppStoreService {
         case failure(String)
     }
 
-    static func login(email: String, password: String, authCode: String? = nil) async throws -> LoginResult {
+    /// ipatool 2.8.0 provisions its SAP assets on the first login: it reads 7 pinned files
+    /// out of Apple's macOS restore image, extracts them into a temporary workspace, and only
+    /// writes its cache once every one of them is done. That takes ~20 minutes on a slow
+    /// connection and ipatool prints nothing at all while doing it, so the UI has to derive
+    /// the phase and the progress from the filesystem.
+    ///
+    /// These sizes come from `requiredFiles` in internal/sap/assets/assets.go (v2.8.0). They
+    /// only ever feed a label - never a decision - so a wrong guess degrades the text, not
+    /// the behaviour.
+    private static let sapAssetBytes: Int64 = 174_733_872
+    private static let loginTimeout: TimeInterval = 300
+
+    private static var sapCacheRoot: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ipatool/sap", isDirectory: true)
+    }
+
+    /// True once ipatool will answer from its cache instead of provisioning again.
+    /// Matches any macOS build: the directory name carries it
+    /// (`apple-assets-macos-27-26A434-arm64-v4`).
+    static func assetsReady() -> Bool {
+        let entries = (try? FileManager.default.contentsOfDirectory(
+            at: sapCacheRoot, includingPropertiesForKeys: nil
+        )) ?? []
+        return entries.contains { $0.lastPathComponent.hasPrefix("apple-assets-macos-") }
+    }
+
+    /// Snapshot of the provisioning workspaces that already exist, taken before the run
+    /// starts. ipatool creates `$TMPDIR/ipatool-macos-27-<random>` per attempt and never
+    /// cleans it up after a SIGTERM, so a machine can have several lying around; without
+    /// this the UI can adopt a dead attempt's workspace and show progress jumping backwards.
+    static func workspaceNames() -> Set<String> {
+        let entries = (try? FileManager.default.contentsOfDirectory(
+            at: FileManager.default.temporaryDirectory, includingPropertiesForKeys: nil
+        )) ?? []
+        return Set(
+            entries.map(\.lastPathComponent).filter { $0.hasPrefix("ipatool-macos-27-") }
+        )
+    }
+
+    /// Progress of an in-flight provisioning run, or nil when there is none to show
+    /// (nothing on disk yet, or the assets are already cached).
+    static func preparationProgress(
+        excluding preexisting: Set<String> = []
+    ) -> (extracted: Int64, total: Int64)? {
+        guard !assetsReady() else { return nil }
+
+        let temp = FileManager.default.temporaryDirectory
+        let candidates = ((try? FileManager.default.contentsOfDirectory(
+            at: temp, includingPropertiesForKeys: nil
+        )) ?? []).filter {
+            $0.lastPathComponent.hasPrefix("ipatool-macos-27-")
+                && !preexisting.contains($0.lastPathComponent)
+        }
+
+        var best: (bytes: Int64, touched: Date)?
+        for candidate in candidates {
+            let frameworks = candidate.appendingPathComponent("frameworks", isDirectory: true)
+            var bytes: Int64 = 0
+            var touched = Date.distantPast
+            guard let walker = FileManager.default.enumerator(
+                at: frameworks, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]
+            ) else { continue }
+            for case let file as URL in walker {
+                let values = try? file.resourceValues(
+                    forKeys: [.fileSizeKey, .contentModificationDateKey]
+                )
+                bytes += Int64(values?.fileSize ?? 0)
+                if let date = values?.contentModificationDate, date > touched { touched = date }
+            }
+            if bytes > 0, touched > (best?.touched ?? .distantPast) {
+                best = (bytes, touched)
+            }
+        }
+
+        guard let best else { return nil }
+        return (best.bytes, sapAssetBytes)
+    }
+
+    private static func megabytes(_ bytes: Int64) -> String {
+        String(format: "%.0f", Double(bytes) / 1_048_576)
+    }
+
+    static func login(
+        email: String, password: String, authCode: String? = nil,
+        preexistingWorkspaces: Set<String> = []
+    ) async throws -> LoginResult {
         var args = ["auth", "login", "-e", email, "-p", password,
                     "--format", "json", "--non-interactive"]
         if let code = authCode, !code.isEmpty {
@@ -22,7 +108,7 @@ enum AppStoreService {
         }
         // First login may take a few minutes: ipatool downloads & sets up the
         // SAP/Unicorn runtime on first run, so use a generous timeout.
-        let result = try await Shell.run("ipatool", arguments: args, timeout: 300)
+        let result = try await Shell.run("ipatool", arguments: args, timeout: loginTimeout)
         print("[AppStore] login: exit=\(result.exitCode) stdout=\(result.stdout) stderr=\(result.stderr)")
         // ipatool returns exit=0 with a "message" field when 2FA is needed
         let output = result.stdout
@@ -31,6 +117,28 @@ enum AppStoreService {
         }
         if result.succeeded {
             return .success
+        }
+        if result.timedOut {
+            // A killed child only tells us SIGTERM, so name the phase we were in instead of
+            // echoing whatever ipatool happened to have printed (an info line counts as an
+            // error to parseError, which is what shipped as "Login failed: preparing
+            // authentication; the first login may take a few minutes").
+            let minutes = Int(loginTimeout / 60)
+            if assetsReady() {
+                return .failure(
+                    "Apple did not answer within \(minutes) minutes. The Apple assets are "
+                        + "already prepared, so this was the sign-in request itself - retry, "
+                        + "or try another network."
+                )
+            }
+            let progress = preparationProgress(excluding: preexistingWorkspaces).map {
+                " at \(megabytes($0.extracted)) / \(megabytes($0.total)) MB"
+            } ?? ""
+            return .failure(
+                "Preparing Apple assets timed out after \(minutes) minutes\(progress). "
+                    + "The first login downloads them from Apple (~20 minutes on a slow "
+                    + "connection); ipatool cannot resume, so a retry starts over."
+            )
         }
         let raw = result.stderr.isEmpty ? output : result.stderr
         return .failure(parseError(raw))

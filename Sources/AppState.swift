@@ -143,6 +143,16 @@ class AppState {
         return false
     }
 
+    private static func preparationLabel(
+        _ progress: (extracted: Int64, total: Int64), since started: Date
+    ) -> String {
+        let done = Int(Double(progress.extracted) / 1_048_576)
+        let total = Int(Double(progress.total) / 1_048_576)
+        let elapsed = Int(Date().timeIntervalSince(started))
+        let clock = String(format: "%d:%02d", elapsed / 60, elapsed % 60)
+        return "First login: preparing Apple assets \(done) / \(total) MB · \(clock)"
+    }
+
     // MARK: - Actions
 
     func checkDependencies() async {
@@ -161,7 +171,26 @@ class AppState {
     func login() async {
         let is2FA = authStep == .twoFactor
         Logger.shared.info("Login started (\(is2FA ? "2FA verification" : "credentials"))")
-        status = .loading("Preparing authentication, first login may take a few minutes...")
+        status = .loading(
+            is2FA || AppStoreService.assetsReady()
+                ? "Preparing authentication, first login may take a few minutes..."
+                : "First login: preparing Apple assets..."
+        )
+
+        // ipatool provisions its SAP assets silently before it even tries to sign in, and it
+        // cannot report anything while doing so. Watch its workspace instead, so the sheet
+        // shows progress for the minutes this takes instead of a frozen spinner.
+        let preexisting = AppStoreService.workspaceNames()
+        let monitor = Task { @MainActor in
+            let started = Date()
+            while !Task.isCancelled {
+                if let progress = AppStoreService.preparationProgress(excluding: preexisting) {
+                    status = .loading(Self.preparationLabel(progress, since: started))
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+        defer { monitor.cancel() }
         do {
             // Deliberately do not revoke the existing session before logging in.
             // Apple's auth edge intermittently rejects or redirects a login
@@ -170,7 +199,8 @@ class AppState {
             // overwrites the stored account on success anyway.
             let result = try await AppStoreService.login(
                 email: email, password: password,
-                authCode: is2FA ? authCode : nil
+                authCode: is2FA ? authCode : nil,
+                preexistingWorkspaces: preexisting
             )
             switch result {
             case .success:

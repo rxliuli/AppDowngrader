@@ -19,6 +19,9 @@ struct ShellResult {
     let stdout: String
     let stderr: String
     let exitCode: Int32
+    /// True when the child was killed by our own timeout, in which case `exitCode`
+    /// is just SIGTERM and says nothing about why the tool was stuck.
+    let timedOut: Bool
     var succeeded: Bool { exitCode == 0 }
 }
 
@@ -89,6 +92,7 @@ enum Shell {
 
             let lock = NSLock()
             var hasResumed = false
+            var didTimeOut = false
             let dataLock = NSLock()
             var stdoutData = Data()
             var stderrData = Data()
@@ -122,6 +126,9 @@ enum Shell {
             }
 
             let timeoutWork = DispatchWorkItem {
+                lock.lock()
+                didTimeOut = true
+                lock.unlock()
                 if process.isRunning { process.terminate() }
             }
             DispatchQueue.global().asyncAfter(
@@ -140,6 +147,10 @@ enum Shell {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 dataLock.unlock()
 
+                lock.lock()
+                let timedOut = didTimeOut
+                lock.unlock()
+
                 if !quiet {
                     Logger.shared.shellDone(
                         command,
@@ -151,7 +162,8 @@ enum Shell {
                 }
 
                 resumeOnce(with: .success(ShellResult(
-                    stdout: stdout, stderr: stderr, exitCode: proc.terminationStatus
+                    stdout: stdout, stderr: stderr, exitCode: proc.terminationStatus,
+                    timedOut: timedOut
                 )))
             }
 
