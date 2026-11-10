@@ -24,7 +24,10 @@ enum AppStoreService {
     /// only ever feed a label - never a decision - so a wrong guess degrades the text, not
     /// the behaviour.
     private static let sapAssetBytes: Int64 = 174_733_872
-    private static let loginTimeout: TimeInterval = 300
+    /// Long enough for the first-login asset provisioning to finish on a slow line: measured
+    /// 21m19s on a 120KB/s connection. A hung connection is the user's Stop button, not this
+    /// number - ipatool has no read timeout of its own, so we still need an upper bound.
+    private static let loginTimeout: TimeInterval = 1800
 
     private static var sapCacheRoot: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -52,6 +55,34 @@ enum AppStoreService {
         return Set(
             entries.map(\.lastPathComponent).filter { $0.hasPrefix("ipatool-macos-27-") }
         )
+    }
+
+    /// Delete the workspaces an abandoned attempt left behind. ipatool cleans its workspace
+    /// with `defer os.RemoveAll`, which does not run when we SIGTERM it, so every timeout or
+    /// Stop otherwise strands ~170MB in $TMPDIR (1.5GB had piled up before this existed).
+    static func discardWorkspaces(createdSince preexisting: Set<String>) {
+        let temp = FileManager.default.temporaryDirectory
+        let entries = (try? FileManager.default.contentsOfDirectory(
+            at: temp, includingPropertiesForKeys: nil
+        )) ?? []
+        for entry in entries
+        where entry.lastPathComponent.hasPrefix("ipatool-macos-27-")
+            && !preexisting.contains(entry.lastPathComponent) {
+            try? FileManager.default.removeItem(at: entry)
+        }
+    }
+
+    /// Workspaces are per-attempt scratch space, so anything present at launch is a leftover
+    /// from an interrupted run and can go. Returns how many were removed, for the log.
+    @discardableResult
+    static func discardStaleWorkspaces() -> Int {
+        let temp = FileManager.default.temporaryDirectory
+        let entries = (try? FileManager.default.contentsOfDirectory(
+            at: temp, includingPropertiesForKeys: nil
+        )) ?? []
+        let stale = entries.filter { $0.lastPathComponent.hasPrefix("ipatool-macos-27-") }
+        for entry in stale { try? FileManager.default.removeItem(at: entry) }
+        return stale.count
     }
 
     /// Progress of an in-flight provisioning run, or nil when there is none to show
@@ -118,27 +149,36 @@ enum AppStoreService {
         if result.succeeded {
             return .success
         }
-        if result.timedOut {
+        if let stopReason = result.stopReason {
             // A killed child only tells us SIGTERM, so name the phase we were in instead of
             // echoing whatever ipatool happened to have printed (an info line counts as an
             // error to parseError, which is what shipped as "Login failed: preparing
             // authentication; the first login may take a few minutes").
-            let minutes = Int(loginTimeout / 60)
-            if assetsReady() {
-                return .failure(
-                    "Apple did not answer within \(minutes) minutes. The Apple assets are "
-                        + "already prepared, so this was the sign-in request itself - retry, "
-                        + "or try another network."
-                )
-            }
             let progress = preparationProgress(excluding: preexistingWorkspaces).map {
                 " at \(megabytes($0.extracted)) / \(megabytes($0.total)) MB"
             } ?? ""
-            return .failure(
-                "Preparing Apple assets timed out after \(minutes) minutes\(progress). "
-                    + "The first login downloads them from Apple (~20 minutes on a slow "
-                    + "connection); ipatool cannot resume, so a retry starts over."
-            )
+
+            switch stopReason {
+            case .cancelled:
+                return .failure(
+                    "Stopped\(progress). ipatool cannot resume, so what it had already "
+                        + "downloaded is discarded - a retry starts from zero."
+                )
+            case .timeout:
+                let minutes = Int(loginTimeout / 60)
+                if assetsReady() {
+                    return .failure(
+                        "Apple did not answer within \(minutes) minutes. The Apple assets are "
+                            + "already prepared, so this was the sign-in request itself - retry, "
+                            + "or try another network."
+                    )
+                }
+                return .failure(
+                    "Preparing Apple assets timed out after \(minutes) minutes\(progress). "
+                        + "The first login downloads them from Apple (~20 minutes on a slow "
+                        + "connection); ipatool cannot resume, so a retry starts over."
+                )
+            }
         }
         let raw = result.stderr.isEmpty ? output : result.stderr
         return .failure(parseError(raw))

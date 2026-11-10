@@ -19,10 +19,15 @@ struct ShellResult {
     let stdout: String
     let stderr: String
     let exitCode: Int32
-    /// True when the child was killed by our own timeout, in which case `exitCode`
-    /// is just SIGTERM and says nothing about why the tool was stuck.
-    let timedOut: Bool
+    /// Why we terminated the child, when we did. A killed child reports nothing but SIGTERM,
+    /// so the exit code alone cannot tell "we timed out" from "the user stopped it".
+    let stopReason: StopReason?
     var succeeded: Bool { exitCode == 0 }
+
+    enum StopReason: Equatable {
+        case timeout
+        case cancelled
+    }
 }
 
 enum Shell {
@@ -38,6 +43,63 @@ enum Shell {
                     + "Everyone else: reinstall AppDowngrader - it ships its own copy."
             }
         }
+    }
+
+    /// Owns "why did we kill it" and gives a cancelled Task (or app termination) a way to
+    /// reach the child. Without this, giving up only abandons the caller: ipatool keeps
+    /// provisioning in the background for ~20 minutes, detached from an app that no longer
+    /// listens (observed as an orphan with PPID=1).
+    private final class StopBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var process: Process?
+        private var reason: ShellResult.StopReason?
+
+        init() {
+            Shell.registryLock.lock()
+            Shell.running[ObjectIdentifier(self)] = self
+            Shell.registryLock.unlock()
+        }
+
+        deinit {
+            Shell.registryLock.lock()
+            Shell.running.removeValue(forKey: ObjectIdentifier(self))
+            Shell.registryLock.unlock()
+        }
+
+        /// Called once the Process exists; if we were already stopped, kill it immediately.
+        func attach(_ process: Process) {
+            lock.lock()
+            self.process = process
+            let stopped = reason != nil
+            lock.unlock()
+            if stopped, process.isRunning { process.terminate() }
+        }
+
+        func stop(_ reason: ShellResult.StopReason) {
+            lock.lock()
+            if self.reason == nil { self.reason = reason }
+            let process = self.process
+            lock.unlock()
+            if let process, process.isRunning { process.terminate() }
+        }
+
+        var stopReason: ShellResult.StopReason? {
+            lock.lock()
+            defer { lock.unlock() }
+            return reason
+        }
+    }
+
+    private static let registryLock = NSLock()
+    private static var running: [ObjectIdentifier: StopBox] = [:]
+
+    /// Terminate every child this process still has running. Called when the app quits, so a
+    /// login in flight cannot outlive the window that started it.
+    static func stopAll() {
+        registryLock.lock()
+        let boxes = Array(running.values)
+        registryLock.unlock()
+        for box in boxes { box.stop(.cancelled) }
     }
 
     /// Where a bundled tool lives inside the app.
@@ -71,7 +133,8 @@ enum Shell {
         arguments: [String],
         timeout: TimeInterval,
         onStdout: (@Sendable (String) -> Void)? = nil,
-        quiet: Bool = false
+        quiet: Bool = false,
+        box: StopBox
     ) async throws -> ShellResult {
         try await withCheckedThrowingContinuation { continuation in
             guard let executable = bundledURL(command) else {
@@ -92,7 +155,6 @@ enum Shell {
 
             let lock = NSLock()
             var hasResumed = false
-            var didTimeOut = false
             let dataLock = NSLock()
             var stdoutData = Data()
             var stderrData = Data()
@@ -125,11 +187,10 @@ enum Shell {
                 dataLock.unlock()
             }
 
+            box.attach(process)
+
             let timeoutWork = DispatchWorkItem {
-                lock.lock()
-                didTimeOut = true
-                lock.unlock()
-                if process.isRunning { process.terminate() }
+                box.stop(.timeout)
             }
             DispatchQueue.global().asyncAfter(
                 deadline: .now() + timeout, execute: timeoutWork
@@ -147,9 +208,7 @@ enum Shell {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 dataLock.unlock()
 
-                lock.lock()
-                let timedOut = didTimeOut
-                lock.unlock()
+                let stopReason = box.stopReason
 
                 if !quiet {
                     Logger.shared.shellDone(
@@ -163,7 +222,7 @@ enum Shell {
 
                 resumeOnce(with: .success(ShellResult(
                     stdout: stdout, stderr: stderr, exitCode: proc.terminationStatus,
-                    timedOut: timedOut
+                    stopReason: stopReason
                 )))
             }
 
@@ -188,7 +247,14 @@ enum Shell {
         timeout: TimeInterval = 15,
         quiet: Bool = false
     ) async throws -> ShellResult {
-        try await execute(command, arguments: arguments, timeout: timeout, quiet: quiet)
+        let box = StopBox()
+        return try await withTaskCancellationHandler {
+            try await execute(
+                command, arguments: arguments, timeout: timeout, quiet: quiet, box: box
+            )
+        } onCancel: {
+            box.stop(.cancelled)
+        }
     }
 
     /// Run a long-running command with real-time stdout streaming.
@@ -198,9 +264,14 @@ enum Shell {
         timeout: TimeInterval = 600,
         onOutput: @escaping @Sendable (String) -> Void
     ) async throws -> ShellResult {
-        try await execute(
-            command, arguments: arguments, timeout: timeout, onStdout: onOutput
-        )
+        let box = StopBox()
+        return try await withTaskCancellationHandler {
+            try await execute(
+                command, arguments: arguments, timeout: timeout, onStdout: onOutput, box: box
+            )
+        } onCancel: {
+            box.stop(.cancelled)
+        }
     }
 
     /// Only ever answers for the bundled copy - see `bundledURL(_:)` for why there is no

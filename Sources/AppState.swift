@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum InitPhase: Equatable {
@@ -41,6 +42,20 @@ class AppState {
     // Task status (for download/install operations)
     var status: TaskStatus = .idle
 
+    /// The login in flight, so the sheet's Stop button has something to cancel.
+    private var loginTask: Task<Void, Never>?
+
+    init() {
+        // A login in flight must not outlive the app: ipatool would keep provisioning for
+        // ~20 minutes with nobody left to show it or to kill it (observed as an orphan
+        // reparented to launchd).
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { _ in
+            Shell.stopAll()
+        }
+    }
+
     // Versions
     var versions: [AppVersion] = []
     var isLoadingVersions = false
@@ -77,6 +92,10 @@ class AppState {
     func initialize() async {
         Logger.shared.info("App initializing (dependencies / devices / apps)...")
         initPhase = .checkingDependencies
+        let stale = AppStoreService.discardStaleWorkspaces()
+        if stale > 0 {
+            Logger.shared.info("Removed \(stale) leftover ipatool workspace(s)")
+        }
         await checkDependencies()
 
         guard dependencies.allSatisfied else {
@@ -168,6 +187,23 @@ class AppState {
         isAuthenticated = await AppStoreService.isAuthenticated()
     }
 
+    /// Entry point for the sheet. While it runs, the primary button becomes Stop.
+    func startLogin() {
+        guard loginTask == nil else { return }
+        loginTask = Task { [weak self] in
+            await self?.login()
+            self?.loginTask = nil
+        }
+    }
+
+    /// macOS convention: the button that started the operation becomes Stop in place
+    /// (Xcode's Run -> Stop). Cancelling the Task reaches the child through Shell's
+    /// cancellation handler, so ipatool is really terminated, not just abandoned.
+    func stopLogin() {
+        Logger.shared.info("Login stopped by user")
+        loginTask?.cancel()
+    }
+
     func login() async {
         let is2FA = authStep == .twoFactor
         Logger.shared.info("Login started (\(is2FA ? "2FA verification" : "credentials"))")
@@ -223,10 +259,12 @@ class AppState {
                 status = .idle
             case .failure(let msg):
                 Logger.shared.error("Login failed: \(msg)")
+                AppStoreService.discardWorkspaces(createdSince: preexisting)
                 status = .error(msg)
             }
         } catch {
             Logger.shared.error("Login threw: \(error.localizedDescription)")
+            AppStoreService.discardWorkspaces(createdSince: preexisting)
             status = .error(error.localizedDescription)
         }
     }

@@ -266,6 +266,24 @@ struct AuthSheet: View {
         return false
     }
 
+    /// While the operation runs the primary button becomes Stop in place, which is what macOS
+    /// does for long-running tasks (Xcode's Run -> Stop, Disk Utility, the installer). "Cancel"
+    /// would read as backing out of something not started yet; this one is already running and
+    /// its downloaded part will be thrown away, so "Stop" and an explicit message afterwards.
+    @ViewBuilder
+    private func primaryButton(
+        _ title: String, disabled: Bool, action: @escaping () -> Void
+    ) -> some View {
+        if isLoggingIn {
+            Button("Stop") { state.stopLogin() }
+                .buttonStyle(.borderedProminent)
+        } else {
+            Button(title, action: action)
+                .buttonStyle(.borderedProminent)
+                .disabled(disabled)
+        }
+    }
+
     @ViewBuilder
     private var loginStatus: some View {
         if case .loading(let msg) = state.status {
@@ -306,21 +324,24 @@ struct AuthSheet: View {
                 TextField("Verification Code", text: $state.authCode)
                     .textFieldStyle(.roundedBorder)
                     .disabled(isLoggingIn)
-                    .onSubmit { if !state.authCode.isEmpty { Task { await state.login() } } }
+                    .onSubmit { if !state.authCode.isEmpty { state.startLogin() } }
 
                 if case .error(let msg) = state.status {
                     Text(msg)
                         .foregroundStyle(.red)
                         .font(.caption)
+                        // Without this the sheet keeps the height it had while the loading
+                        // label was a single line and the error gets truncated with "..." -
+                        // exactly what "Stopped. ipatool cannot resume, so what it had
+                        // already downlo..." looked like.
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 loginStatus
 
-                Button("Verify") {
-                    Task { await state.login() }
+                primaryButton("Verify", disabled: state.authCode.isEmpty) {
+                    state.startLogin()
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(state.authCode.isEmpty || isLoggingIn)
             } else {
                 Text("Login with your Apple ID to download apps")
                     .foregroundStyle(.secondary)
@@ -333,21 +354,28 @@ struct AuthSheet: View {
                 SecureField("Password", text: $state.password)
                     .textFieldStyle(.roundedBorder)
                     .disabled(isLoggingIn)
-                    .onSubmit { if !state.email.isEmpty && !state.password.isEmpty { Task { await state.login() } } }
+                    .onSubmit {
+                        if !state.email.isEmpty && !state.password.isEmpty { state.startLogin() }
+                    }
 
                 if case .error(let msg) = state.status {
                     Text(msg)
                         .foregroundStyle(.red)
                         .font(.caption)
+                        // Without this the sheet keeps the height it had while the loading
+                        // label was a single line and the error gets truncated with "..." -
+                        // exactly what "Stopped. ipatool cannot resume, so what it had
+                        // already downlo..." looked like.
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 loginStatus
 
-                Button("Login") {
-                    Task { await state.login() }
+                primaryButton(
+                    "Login", disabled: state.email.isEmpty || state.password.isEmpty
+                ) {
+                    state.startLogin()
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(state.email.isEmpty || state.password.isEmpty || isLoggingIn)
             }
 
             Button("Close") { dismiss() }
