@@ -8,10 +8,11 @@
     "sha256sum published next to the release asset, for go-ios (which publishes none)",
     "it was computed from the downloaded zip.",
     "",
-    "archs lists what the *output* must contain; inputs are lipo'd when there is more",
-    "than one. No strip pass: it is only needed to squeeze the universal ipatool under",
-    "GitHub's 100MiB per-file limit, which stops applying once the binaries are not",
-    "committed - and strip(1) output is not byte-reproducible, while lipo is."
+    "Everything here is arm64 only, matching the app's ARCHS (project.yml): the app is",
+    "Apple silicon by design, and shipping both slices doubled the DMG (67MB -> ~35MB).",
+    "archs lists what the *output* must contain; thin is applied with lipo -thin when a",
+    "tool only publishes a universal binary. No strip pass: strip(1) output is not",
+    "byte-reproducible, while lipo is."
   ],
   "format": 1,
   "tools": [
@@ -19,16 +20,9 @@
       "name": "ipatool",
       "version": "2.8.0",
       "archs": [
-        "arm64",
-        "x86_64"
+        "arm64"
       ],
       "inputs": [
-        {
-          "arch": "x86_64",
-          "url": "https://github.com/majd/ipatool/releases/download/v2.8.0/ipatool-2.8.0-macos-amd64.tar.gz",
-          "sha256": "4e5e0b9b54a041a4c9fc90de6f8f69a36bda9c5a69a772ecc1a577c1dcb237cc",
-          "member": "bin/ipatool-2.8.0-macos-amd64"
-        },
         {
           "arch": "arm64",
           "url": "https://github.com/majd/ipatool/releases/download/v2.8.0/ipatool-2.8.0-macos-arm64.tar.gz",
@@ -41,8 +35,7 @@
       "name": "ios",
       "version": "1.0.206",
       "archs": [
-        "arm64",
-        "x86_64"
+        "arm64"
       ],
       "inputs": [
         {
@@ -51,7 +44,8 @@
           "sha256": "2c8165dff8b0014945e59aa1f37eed82c572c6876312e40240d58a1c65b35140",
           "member": "ios"
         }
-      ]
+      ],
+      "thin": "arm64"
     }
   ]
 }

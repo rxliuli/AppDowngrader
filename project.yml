@@ -22,6 +22,13 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
+    # Apple silicon only, on purpose: the two bundled tools are ~50MB and ~16MB *per slice*,
+    # so carrying x86_64 doubled the DMG (67MB -> ~35MB without it), and Intel Macs cannot run
+    # the tool this app is built around for much longer anyway (0.0.12 was the last universal
+    # build). Keep in sync with scripts/binaries.json, where every tool is pinned to arm64 -
+    # a universal tool inside an arm64-only app is dead weight, an arm64 tool inside a universal
+    # app dies with "bad CPU type" on Intel.
+    ARCHS: arm64
     # The **single source of truth** for the version is right here: the Info.plist at the repo
     # root holds $(MARKETING_VERSION) / $(CURRENT_PROJECT_VERSION), substituted by Xcode at build
     # time. The release CI reads this file with rxliuli/version-check to decide whether to

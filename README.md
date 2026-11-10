@@ -14,7 +14,7 @@ A macOS app for downgrading iOS apps to older versions. It provides a GUI for br
 
 ## Requirements
 
-- macOS 14.0+
+- macOS 14.0+ on Apple silicon (0.0.12 was the last universal build)
 - An iOS device connected via USB
 - An Apple ID (for downloading apps from the App Store)
 

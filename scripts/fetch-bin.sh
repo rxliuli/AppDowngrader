@@ -90,7 +90,7 @@ elif mode == "tool":
     canonical = json.dumps(tool, sort_keys=True, separators=(",", ":"))
     key = hashlib.sha256((fmt + canonical).encode()).hexdigest()[:12]
     emit([tool["name"], tool["version"], tool.get("strip", ""),
-          ",".join(tool["archs"]), key])
+          ",".join(tool["archs"]), key, tool.get("thin", "")])
 elif mode == "inputs":
     for entry in find(sys.argv[4])["inputs"]:
         emit([entry["arch"], entry["sha256"], entry["member"], entry["url"]])
@@ -157,7 +157,7 @@ while IFS= read -r name; do
     [ -n "$name" ] || continue
 
     tool_line=$(manifest_query tool "$name")
-    IFS=$'\x1f' read -r _ version strip archs cachekey <<<"$tool_line"
+    IFS=$'\x1f' read -r _ version strip archs cachekey thin <<<"$tool_line"
     cache_dir="$CACHE_ROOT/$name-$version-$cachekey"
     staged="$cache_dir/$name"
 
@@ -203,6 +203,14 @@ while IFS= read -r name; do
         if [ -n "$strip" ]; then
             strip "-$strip" "$assembled"
         fi
+
+        # Some projects (go-ios) only publish a universal binary; the app is arm64
+        # only, so drop the other slice here rather than shipping it.
+        if [ -n "$thin" ]; then
+            lipo -thin "$thin" "$assembled" -output "$assembled.thin"
+            mv "$assembled.thin" "$assembled"
+        fi
+
         chmod +x "$assembled"
 
         got_archs=$(lipo -archs "$assembled")
