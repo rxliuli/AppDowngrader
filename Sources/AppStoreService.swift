@@ -29,6 +29,13 @@ enum AppStoreService {
     /// number - ipatool has no read timeout of its own, so we still need an upper bound.
     private static let loginTimeout: TimeInterval = 1800
 
+    /// Upper bound for one signed store call (list-versions, get-version-metadata, purchase).
+    /// ipatool 2.8.0 runs every signed request through its local Store emulator and reloads
+    /// ~175MB of Apple assets each time, so even with the assets cached a single call is slow:
+    /// measured on an M2 (2026-11-12, one call at a time) list-versions 38s,
+    /// get-version-metadata 45-53s, purchase 9s. The old 15s/30s limits killed every call.
+    static let storeRequestTimeout: TimeInterval = 180
+
     private static var sapCacheRoot: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ipatool/sap", isDirectory: true)
@@ -207,7 +214,7 @@ enum AppStoreService {
         guard let result = try? await Shell.run(
             "ipatool",
             arguments: ["purchase", "-b", bundleId, "--format", "json"],
-            timeout: 30
+            timeout: storeRequestTimeout
         ) else {
             print("[AppStore] purchase: failed to run ipatool")
             return (false, "failed to run ipatool")
@@ -224,24 +231,17 @@ enum AppStoreService {
         print("[AppStore] listVersions: \(bundleId)")
 
         // Try list-versions directly first (works if user already has license)
-        var result = try await Shell.run(
-            "ipatool",
-            arguments: ["list-versions", "-b", bundleId, "--format", "json"],
-            timeout: 30
-        )
-        print("[AppStore] listVersions: exit=\(result.exitCode) stdout=\(result.stdout) stderr=\(result.stderr)")
+        var result = try await runListVersions(bundleId: bundleId)
 
-        // If failed, try purchase + retry
-        if !result.succeeded {
-            print("[AppStore] listVersions: failed, attempting purchase...")
+        // Only a missing license is fixed by purchasing. A timeout or any other failure used
+        // to take this path too, which doubled the wait and then reported the retry's
+        // timeout instead of the real problem.
+        if !result.succeeded, result.stopReason == nil,
+           Self.parseError(failureOutput(result)).localizedCaseInsensitiveContains("license is required") {
+            print("[AppStore] listVersions: no license, attempting purchase...")
             let purchaseResult = await purchase(bundleId: bundleId)
             if purchaseResult.succeeded {
-                result = try await Shell.run(
-                    "ipatool",
-                    arguments: ["list-versions", "-b", bundleId, "--format", "json"],
-                    timeout: 30
-                )
-                print("[AppStore] listVersions retry: exit=\(result.exitCode) stdout=\(result.stdout) stderr=\(result.stderr)")
+                result = try await runListVersions(bundleId: bundleId)
             } else if let purchaseError = purchaseResult.error,
                       AppState.looksLikeAuthError(purchaseError) {
                 // Auth error from purchase — trigger re-login
@@ -253,9 +253,8 @@ enum AppStoreService {
         }
 
         guard result.succeeded else {
-            let raw = result.stderr.isEmpty ? result.stdout : result.stderr
             throw NSError(domain: "AppStore", code: 3,
-                          userInfo: [NSLocalizedDescriptionKey: Self.parseError(raw)])
+                          userInfo: [NSLocalizedDescriptionKey: storeFailureMessage(result)])
         }
 
         let cleaned = result.stdout.strippingANSI
@@ -281,20 +280,60 @@ enum AppStoreService {
         }
     }
 
+    private static func runListVersions(bundleId: String) async throws -> ShellResult {
+        let result = try await Shell.run(
+            "ipatool",
+            arguments: ["list-versions", "-b", bundleId, "--format", "json"],
+            timeout: storeRequestTimeout
+        )
+        print("[AppStore] listVersions: exit=\(result.exitCode) stdout=\(result.stdout) stderr=\(result.stderr)")
+        return result
+    }
+
+    private static func failureOutput(_ result: ShellResult) -> String {
+        result.stderr.isEmpty ? result.stdout : result.stderr
+    }
+
+    /// A killed child only reports SIGTERM, and whatever ipatool printed before that is an
+    /// info line, not the cause - so name what actually happened.
+    private static func storeFailureMessage(_ result: ShellResult) -> String {
+        switch result.stopReason {
+        case .timeout:
+            return "Apple did not respond within \(Int(storeRequestTimeout)) seconds. "
+                + "ipatool 2.8.0 needs about a minute per request, so retry, or try another network."
+        case .cancelled:
+            return "Cancelled."
+        case nil:
+            return parseError(failureOutput(result))
+        }
+    }
+
+    /// Returns nil when ipatool answered but had no display version or release date for
+    /// this build (a final answer), and throws when the call itself failed, timed out or
+    /// was cancelled, so the caller can try again later instead of caching "nothing".
     static func getVersionMetadata(
         bundleId: String, versionId: String
-    ) async -> VersionMetadata? {
-        guard let result = try? await Shell.run(
+    ) async throws -> VersionMetadata? {
+        let result = try await Shell.run(
             "ipatool",
             arguments: [
                 "get-version-metadata", "-b", bundleId,
                 "--external-version-id", versionId, "--format", "json",
             ],
-            timeout: 15
-        ), result.succeeded,
-              let data = result.stdout.data(using: .utf8),
+            timeout: storeRequestTimeout
+        )
+        try Task.checkCancellation()
+        guard result.succeeded else {
+            throw NSError(domain: "AppStore", code: 5,
+                          userInfo: [NSLocalizedDescriptionKey: storeFailureMessage(result)])
+        }
+        guard let data = result.stdout.strippingANSI.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
+        else {
+            throw NSError(domain: "AppStore", code: 6, userInfo: [
+                NSLocalizedDescriptionKey: "Unreadable ipatool output: \(result.stdout)",
+            ])
+        }
 
         let displayVersion = (json["displayVersion"] as? String).flatMap {
             $0.isEmpty ? nil : $0

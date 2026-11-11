@@ -315,6 +315,7 @@ class AppState {
     func selectApp(_ app: InstalledApp) async {
         status = .idle
         storeInfo = nil
+        resetMetadataLoads()
         versions = []
         selectedVersion = nil
         versionsError = nil
@@ -337,6 +338,9 @@ class AppState {
 
         do {
             let versionIds = try await AppStoreService.listVersions(bundleId: bundleId)
+            // The user may have picked another app during the (minute-long) request.
+            guard selectedApp?.bundleId == bundleId else { return }
+            resetMetadataLoads()
             versions = versionIds.reversed().map { AppVersion(id: $0) }
         } catch {
             if handleAuthErrorIfNeeded(error, retry: { [weak self] in
@@ -349,14 +353,27 @@ class AppState {
         }
     }
 
-    /// Load metadata for a single version on demand (called when row appears).
+    /// How many `get-version-metadata` calls may run at once. With ipatool 2.8.0 each one
+    /// takes about a minute and ~600MB, because every signed request reloads Apple's assets
+    /// and runs the Store emulator. Starting one per visible row (~15 at once) made them
+    /// all starve each other past the timeout, so none ever finished.
+    private static let maxConcurrentMetadataLoads = 2
+
+    /// Version IDs waiting for a metadata slot, oldest request first.
+    @ObservationIgnored private var metadataQueue: [String] = []
+    @ObservationIgnored private var metadataInFlight: Set<String> = []
+    @ObservationIgnored private var metadataWorkers: [UUID: Task<Void, Never>] = [:]
+
+    /// Request metadata for a version (called when its row appears, or on retry).
     ///
     /// Costs one `ipatool get-version-metadata` call per version: a signed App Store
-    /// request plus a ranged read of the IPA (~160 KB). Kept lazy and disk-cached.
+    /// request plus a ranged read of the IPA (~160 KB). Kept lazy, queued and disk-cached.
     func loadMetadataIfNeeded(for versionId: String) async {
         guard let app = selectedApp,
               let idx = versions.firstIndex(where: { $0.id == versionId }),
-              !versions[idx].metadataLoaded
+              !versions[idx].metadataLoaded,
+              !metadataInFlight.contains(versionId),
+              !metadataQueue.contains(versionId)
         else { return }
         let bundleId = app.bundleId
 
@@ -368,16 +385,69 @@ class AppState {
             return
         }
 
-        let metadata = await AppStoreService.getVersionMetadata(
-            bundleId: bundleId, versionId: versionId
-        )
-        apply(metadata: metadata, for: versionId, bundleId: bundleId)
+        // Re-check after the await: the app may have changed, or another call queued it.
+        guard selectedApp?.bundleId == bundleId,
+              let idx = versions.firstIndex(where: { $0.id == versionId }),
+              !versions[idx].metadataLoaded,
+              !metadataInFlight.contains(versionId),
+              !metadataQueue.contains(versionId)
+        else { return }
 
-        if let metadata {
-            await MetadataCache.shared.set(
-                bundleId: bundleId, versionId: versionId, metadata: metadata
-            )
+        versions[idx].metadataFailed = false
+        metadataQueue.append(versionId)
+        startMetadataWorkers()
+    }
+
+    /// A row scrolled out of view: drop its request if it has not started yet, so the
+    /// slots go to the rows the user is looking at. A request already running finishes
+    /// and is cached.
+    func cancelMetadataLoad(for versionId: String) {
+        metadataQueue.removeAll { $0 == versionId }
+    }
+
+    private func startMetadataWorkers() {
+        while metadataWorkers.count < Self.maxConcurrentMetadataLoads, !metadataQueue.isEmpty {
+            let workerId = UUID()
+            metadataWorkers[workerId] = Task { [weak self] in
+                await self?.runMetadataWorker()
+                self?.metadataWorkers[workerId] = nil
+            }
         }
+    }
+
+    private func runMetadataWorker() async {
+        while !Task.isCancelled, !metadataQueue.isEmpty {
+            guard let bundleId = selectedApp?.bundleId else { return }
+            let versionId = metadataQueue.removeFirst()
+            metadataInFlight.insert(versionId)
+            defer { metadataInFlight.remove(versionId) }
+
+            do {
+                let metadata = try await AppStoreService.getVersionMetadata(
+                    bundleId: bundleId, versionId: versionId
+                )
+                apply(metadata: metadata, for: versionId, bundleId: bundleId)
+                if let metadata {
+                    await MetadataCache.shared.set(
+                        bundleId: bundleId, versionId: versionId, metadata: metadata
+                    )
+                }
+            } catch {
+                // Cancelled means the user moved to another app: nothing to report.
+                if Task.isCancelled || error is CancellationError { return }
+                Logger.shared.warn("Version metadata \(bundleId) \(versionId) failed: \(error.localizedDescription)")
+                markMetadataFailed(versionId, bundleId: bundleId)
+            }
+        }
+    }
+
+    /// Stop everything queued or running for the previous version list. Cancelling a
+    /// worker kills its ipatool child (Shell.run's cancellation handler).
+    private func resetMetadataLoads() {
+        metadataQueue.removeAll()
+        metadataInFlight.removeAll()
+        for worker in metadataWorkers.values { worker.cancel() }
+        metadataWorkers.removeAll()
     }
 
     private func apply(metadata: VersionMetadata?, for versionId: String, bundleId: String) {
@@ -389,6 +459,15 @@ class AppState {
         versions[idx].version = metadata?.displayVersion
         versions[idx].releaseDate = metadata?.releaseDate
         versions[idx].metadataLoaded = true
+        versions[idx].metadataFailed = false
+    }
+
+    private func markMetadataFailed(_ versionId: String, bundleId: String) {
+        guard selectedApp?.bundleId == bundleId,
+              let idx = versions.firstIndex(where: { $0.id == versionId })
+        else { return }
+        // Deliberately not metadataLoaded: a failure is not an answer, so the row can retry.
+        versions[idx].metadataFailed = true
     }
 
     func downloadAndInstall() async {

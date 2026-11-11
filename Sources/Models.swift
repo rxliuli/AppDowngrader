@@ -41,6 +41,9 @@ struct AppVersion: Identifiable, Hashable {
     var version: String? // human-readable version string (e.g. "2.0.1")
     var releaseDate: Date? // App Store release date, nil until metadata loads
     var metadataLoaded = false
+    /// The last metadata request failed (timeout, network, ...). Not final: the row
+    /// retries when it reappears or when the user asks.
+    var metadataFailed = false
 
     var displayName: String {
         if let version { return "v\(version)" }

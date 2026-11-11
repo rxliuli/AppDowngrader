@@ -111,13 +111,24 @@ struct AppDetailView: View {
 
                     Spacer()
 
-                    if !version.metadataLoaded {
+                    if version.metadataFailed {
+                        Button {
+                            Task { await state.loadMetadataIfNeeded(for: version.id) }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Couldn't load this version's details. Click to retry.")
+                    } else if !version.metadataLoaded {
                         ProgressView().controlSize(.mini)
                     }
                 }
                 .tag(version)
                 .onAppear {
                     Task { await state.loadMetadataIfNeeded(for: version.id) }
+                }
+                .onDisappear {
+                    state.cancelMetadataLoad(for: version.id)
                 }
             }
         }
