@@ -353,11 +353,25 @@ class AppState {
         }
     }
 
-    /// How many `get-version-metadata` calls may run at once. With ipatool 2.8.0 each one
-    /// takes about a minute and ~600MB, because every signed request reloads Apple's assets
-    /// and runs the Store emulator. Starting one per visible row (~15 at once) made them
-    /// all starve each other past the timeout, so none ever finished.
-    private static let maxConcurrentMetadataLoads = 2
+    /// How many `get-version-metadata` calls may run at once, sized to the machine.
+    ///
+    /// Each call is a separate ipatool process that peaks at ~590MB and, for apps with many
+    /// files, keeps about one core busy (ipatool 2.8.1, M2 Max: Alipay 62s wall / 48s CPU,
+    /// majd/ipatool#663). Under 2.8.0 starting one per visible row (~15 at once) starved
+    /// them all past the timeout. So: half the performance cores, and one call per 4GB of
+    /// RAM, clamped to 2...6. That is 2 on an 8GB M1 Air and 4 on a 16GB M2 Pro or more.
+    private static let maxConcurrentMetadataLoads: Int = {
+        var perfCores: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        if sysctlbyname("hw.perflevel0.physicalcpu", &perfCores, &size, nil, 0) != 0 || perfCores <= 0 {
+            perfCores = Int32(ProcessInfo.processInfo.activeProcessorCount / 2)
+        }
+        let byCores = Int(perfCores) / 2
+        let byMemory = Int(ProcessInfo.processInfo.physicalMemory >> 30) / 4
+        let limit = min(max(min(byCores, byMemory), 2), 6)
+        Logger.shared.info("Metadata concurrency: \(limit) (perf cores \(perfCores), RAM \(ProcessInfo.processInfo.physicalMemory >> 30)GB)")
+        return limit
+    }()
 
     /// Version IDs waiting for a metadata slot, oldest request first.
     @ObservationIgnored private var metadataQueue: [String] = []
