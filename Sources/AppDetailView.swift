@@ -113,7 +113,7 @@ struct AppDetailView: View {
 
                     if version.metadataFailed {
                         Button {
-                            Task { await state.loadMetadataIfNeeded(for: version.id) }
+                            Task { await state.loadMetadataIfNeeded(for: version.id, jumpQueue: true) }
                         } label: {
                             Image(systemName: "arrow.clockwise")
                         }

@@ -368,7 +368,9 @@ class AppState {
     ///
     /// Costs one `ipatool get-version-metadata` call per version: a signed App Store
     /// request plus a ranged read of the IPA (~160 KB). Kept lazy, queued and disk-cached.
-    func loadMetadataIfNeeded(for versionId: String) async {
+    /// `jumpQueue` puts an explicit retry first: appended, it waited behind every row
+    /// already queued (~90s in testing) for a click the user expects to act now.
+    func loadMetadataIfNeeded(for versionId: String, jumpQueue: Bool = false) async {
         guard let app = selectedApp,
               let idx = versions.firstIndex(where: { $0.id == versionId }),
               !versions[idx].metadataLoaded,
@@ -394,7 +396,11 @@ class AppState {
         else { return }
 
         versions[idx].metadataFailed = false
-        metadataQueue.append(versionId)
+        if jumpQueue {
+            metadataQueue.insert(versionId, at: 0)
+        } else {
+            metadataQueue.append(versionId)
+        }
         startMetadataWorkers()
     }
 

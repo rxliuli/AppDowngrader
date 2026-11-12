@@ -304,7 +304,9 @@ enum AppStoreService {
         case .cancelled:
             return "Cancelled."
         case nil:
-            return parseError(failureOutput(result))
+            let message = parseError(failureOutput(result))
+            // Killed by a signal we did not send (OOM, kill -9): nothing was printed.
+            return message.isEmpty ? "ipatool exited with code \(result.exitCode)" : message
         }
     }
 
