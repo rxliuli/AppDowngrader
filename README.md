@@ -74,4 +74,4 @@ If you find this tool useful, consider [sponsoring me on GitHub](https://github.
 
 ## License
 
-MIT
+[GPL-3.0](./LICENSE)
